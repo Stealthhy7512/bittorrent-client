@@ -71,9 +71,6 @@ func buildTrackerURL(trackerURL string, r AnnounceRequest) (string, error) {
 	} else {
 		keys.Set("compact", "0")
 	}
-	if r.Event != "" {
-		keys.Set("event", string(r.Event))
-	}
 
 	base.RawQuery = keys.Encode()
 	return base.String(), nil

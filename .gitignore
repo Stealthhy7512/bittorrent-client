@@ -1,0 +1,14 @@
+*.exe
+*.exe~
+*.dll
+
+*.test
+
+*.out
+
+go.work
+go.work.sum
+
+.env
+
+nvim.log

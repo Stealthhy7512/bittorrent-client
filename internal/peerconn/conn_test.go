@@ -1,11 +1,76 @@
 package peerconn
 
 import (
+	"context"
+	"errors"
 	"net"
+	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
 )
+
+func TestDialHonorsCancellationDuringHandshake(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	addr, err := netip.ParseAddrPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	accepted := make(chan net.Conn, 1)
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if _, err := peerwire.ReadHandshake(conn); err != nil {
+			conn.Close()
+			serverErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dialDone := make(chan error, 1)
+	go func() {
+		conn, _, err := Dial(ctx, addr, [20]byte{1}, [20]byte{2})
+		if conn != nil {
+			conn.Close()
+		}
+		dialDone <- err
+	}()
+
+	var serverConn net.Conn
+	select {
+	case serverConn = <-accepted:
+		t.Cleanup(func() { serverConn.Close() })
+	case err := <-serverErr:
+		t.Fatalf("fake peer error = %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("fake peer did not receive handshake")
+	}
+
+	cancel()
+	select {
+	case err := <-dialDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Dial() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		serverConn.Close()
+		<-dialDone
+		t.Fatal("Dial() did not stop after context cancellation")
+	}
+}
 
 func TestExchangeHandshake(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
@@ -31,7 +96,7 @@ func TestExchangeHandshake(t *testing.T) {
 			return
 		}
 		if received.InfoHash != infoHash {
-			serverDone <- err
+			serverDone <- errors.New("received different info hash")
 			return
 		}
 

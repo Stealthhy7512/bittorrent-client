@@ -2,9 +2,33 @@ package tracker
 
 import (
 	"bytes"
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestClientAnnounceIncludesEvent(t *testing.T) {
+	events := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		events <- r.URL.Query().Get("event")
+		_, _ = w.Write([]byte("d8:intervali60e5:peers0:e"))
+	}))
+	t.Cleanup(server.Close)
+
+	client := Client{HTTPClient: server.Client()}
+	_, err := client.Announce(context.Background(), server.URL, AnnounceRequest{
+		Event: EventStarted,
+	})
+	if err != nil {
+		t.Fatalf("Announce() error = %v", err)
+	}
+
+	if got := <-events; got != string(EventStarted) {
+		t.Fatalf("event = %q, want %q", got, EventStarted)
+	}
+}
 
 func TestDecodeAnnounceResponseWithDictionaryPeers(t *testing.T) {
 	response := []byte(

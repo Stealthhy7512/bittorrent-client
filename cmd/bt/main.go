@@ -7,11 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"time"
 
+	"github.com/Stealthhy7512/bittorrent-client/internal/download"
 	"github.com/Stealthhy7512/bittorrent-client/internal/metainfo"
-	"github.com/Stealthhy7512/bittorrent-client/internal/peerconn"
 	"github.com/Stealthhy7512/bittorrent-client/internal/tracker"
 )
 
@@ -83,6 +84,7 @@ func announce(args []string) error {
 		Port:     uint16(*port),
 		Left:     uint64(torrent.Length),
 		Compact:  true,
+		Event:    tracker.EventStarted,
 	})
 
 	if err != nil {
@@ -138,9 +140,9 @@ func inspect(args []string) error {
 func handshake(args []string) error {
 	flags := flag.NewFlagSet("handshake", flag.ContinueOnError)
 	port := flags.Uint("port", 6881, "listening port advertised to the tracker")
-	timeout := flags.Duration("timeout", 10*time.Second, "announce request timeout")
+	timeout := flags.Duration("timeout", 10*time.Second, "handshake operation timeout")
 	flags.Usage = func() {
-		fmt.Fprintln(flags.Output(), "usage: bt handshake [--port PORT] <.torrent>")
+		fmt.Fprintln(flags.Output(), "usage: bt handshake [--port PORT] [--timeout DURATION] <.torrent>")
 	}
 
 	if err := flags.Parse(args); err != nil {
@@ -184,28 +186,27 @@ func handshake(args []string) error {
 		Port:     uint16(*port),
 		Left:     uint64(torrent.Length),
 		Compact:  true,
+		Event:    tracker.EventStarted,
 	})
 
 	if err != nil {
 		return err
 	}
 
-	var lastErr error
-	for _, peer := range res.Peers {
-		conn, remote, err := peerconn.Dial(ctx, peer.Addr, torrent.InfoHash, peerID)
-		if err != nil {
-			lastErr = fmt.Errorf("%v: %w", peer.Addr, err)
-			continue
-		}
-		defer conn.Close()
-
-		fmt.Printf("peer addr: %v remote peer ID: %v\n", peer.Addr, remote.PeerID)
-		return nil
+	addrs := make([]netip.AddrPort, len(res.Peers))
+	for i, peer := range res.Peers {
+		addrs[i] = peer.Addr
 	}
 
-	if lastErr != nil {
-		return fmt.Errorf("no tracker peer completed handshake: %w", lastErr)
+	result, err := download.DialFirst(ctx, addrs, torrent.InfoHash, peerID, download.DialOptions{
+		MaxConcurrent:  4,
+		AttemptTimeout: 5 * time.Second,
+	})
+	if err != nil {
+		return fmt.Errorf("no tracker peer completed handshake: %w", err)
 	}
+	defer result.Conn.Close()
 
-	return errors.New("no peer returned")
+	fmt.Printf("Peer address: %s\nRemote peer ID: %x\n", result.Addr, result.Handshake.PeerID)
+	return nil
 }

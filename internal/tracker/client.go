@@ -65,6 +65,9 @@ func buildTrackerURL(trackerURL string, r AnnounceRequest) (string, error) {
 	keys.Set("uploaded", strconv.FormatUint(uint64(r.Uploaded), 10))
 	keys.Set("downloaded", strconv.FormatUint(uint64(r.Downloaded), 10))
 	keys.Set("left", strconv.FormatUint(uint64(r.Left), 10))
+	if r.Event != "" {
+		keys.Set("event", string(r.Event))
+	}
 
 	if r.Compact {
 		keys.Set("compact", "1")

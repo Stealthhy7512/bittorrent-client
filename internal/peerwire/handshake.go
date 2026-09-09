@@ -18,13 +18,19 @@ type Handshake struct {
 
 func (h Handshake) WriteTo(w io.Writer) (int64, error) {
 	serialized := h.bytes()
-
-	n, err := w.Write(serialized[:])
-	if err == nil && n != len(serialized) {
-		err = io.ErrShortWrite
+	written := 0
+	for written < len(serialized) {
+		n, err := w.Write(serialized[written:])
+		written += n
+		if err != nil {
+			return int64(written), err
+		}
+		if n == 0 {
+			return int64(written), io.ErrNoProgress
+		}
 	}
 
-	return int64(n), err
+	return int64(written), nil
 }
 
 func ReadHandshake(r io.Reader) (Handshake, error) {

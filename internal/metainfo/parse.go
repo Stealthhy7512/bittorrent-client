@@ -3,6 +3,7 @@ package metainfo
 import (
 	"bytes"
 	"crypto/sha1"
+	"errors"
 	"fmt"
 	"os"
 
@@ -42,9 +43,29 @@ func Open(path string) (TorrentFile, error) {
 }
 
 func (meta metaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
+	if meta.Info.PieceLength <= 0 {
+		return TorrentFile{}, errors.New("piece length must be positive")
+	}
+	if meta.Info.Length < 0 {
+		return TorrentFile{}, errors.New("length must not be negative")
+	}
+
 	pieceHashes, err := meta.Info.splitPieceHashes()
 	if err != nil {
 		return TorrentFile{}, err
+	}
+	expectedPieceCount := int64(0)
+	if meta.Info.Length > 0 {
+		expectedPieceCount = 1 + (meta.Info.Length-1)/meta.Info.PieceLength
+	}
+	if int64(len(pieceHashes)) != expectedPieceCount {
+		return TorrentFile{}, fmt.Errorf(
+			"piece hash count is %d, want %d for length %d and piece length %d",
+			len(pieceHashes),
+			expectedPieceCount,
+			meta.Info.Length,
+			meta.Info.PieceLength,
+		)
 	}
 
 	return TorrentFile{

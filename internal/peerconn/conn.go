@@ -25,21 +25,52 @@ func Dial(
 		return nil, peerwire.Handshake{}, err
 	}
 
-	if deadline, ok := ctx.Deadline(); ok {
-		if err = conn.SetDeadline(deadline); err != nil {
-			conn.Close()
-			return nil, peerwire.Handshake{}, err
-		}
-		defer conn.SetDeadline(time.Time{})
-	}
-
-	remote, err := exchangeHandshake(conn, infoHash, peerID)
+	stopWatching, err := watchContext(ctx, conn)
 	if err != nil {
 		conn.Close()
 		return nil, peerwire.Handshake{}, err
 	}
+	defer stopWatching()
+
+	remote, err := exchangeHandshake(conn, infoHash, peerID)
+	if err != nil {
+		conn.Close()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, peerwire.Handshake{}, ctxErr
+		}
+		return nil, peerwire.Handshake{}, err
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		conn.Close()
+		return nil, peerwire.Handshake{}, ctxErr
+	}
 
 	return conn, remote, nil
+}
+
+func watchContext(ctx context.Context, conn net.Conn) (func(), error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := conn.SetDeadline(deadline); err != nil {
+			return nil, err
+		}
+	}
+
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-stop:
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-stopped
+		_ = conn.SetDeadline(time.Time{})
+	}, nil
 }
 
 func exchangeHandshake(

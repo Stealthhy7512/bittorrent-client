@@ -12,3 +12,8 @@ go.work.sum
 .env
 
 nvim.log
+
+.DS_Store
+
+*.md
+docs/

@@ -1,17 +1,18 @@
 package metainfo
 
-type MetaInfo struct {
+type metaInfo struct {
 	Announce string `bencode:"announce"`
-	Info     Info   `bencode:"info"`
+	Info     info   `bencode:"info"`
 }
 
-type Info struct {
+type info struct {
 	Length      int64  `bencode:"length"`
 	Name        string `bencode:"name"`
 	PieceLength int64  `bencode:"piece length"`
 	Pieces      string `bencode:"pieces"`
 }
 
+// TorrentFile is the metadata needed to download a single-file torrent.
 type TorrentFile struct {
 	Announce    string
 	InfoHash    [20]byte

@@ -26,14 +26,14 @@ func Open(path string) (TorrentFile, error) {
 		return TorrentFile{}, fmt.Errorf("decode torrent file: %w", err)
 	}
 
-	var info Info
-	if err := bencode.Unmarshal(bytes.NewReader(raw.Info), &info); err != nil {
+	var decodedInfo info
+	if err := bencode.Unmarshal(bytes.NewReader(raw.Info), &decodedInfo); err != nil {
 		return TorrentFile{}, fmt.Errorf("decode info dict: %w", err)
 	}
 
-	meta := MetaInfo{
+	meta := metaInfo{
 		Announce: raw.Announce,
-		Info:     info,
+		Info:     decodedInfo,
 	}
 
 	infoHash := sha1.Sum(raw.Info)
@@ -41,7 +41,7 @@ func Open(path string) (TorrentFile, error) {
 	return meta.toTorrentFile(infoHash)
 }
 
-func (meta MetaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
+func (meta metaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
 	pieceHashes, err := meta.Info.splitPieceHashes()
 	if err != nil {
 		return TorrentFile{}, err
@@ -57,7 +57,7 @@ func (meta MetaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
 	}, nil
 }
 
-func (info Info) splitPieceHashes() ([][20]byte, error) {
+func (info info) splitPieceHashes() ([][20]byte, error) {
 	const hashLength = 20
 
 	pieces := []byte(info.Pieces)

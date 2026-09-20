@@ -11,8 +11,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/Stealthhy7512/bittorrent-client/internal/download"
 	"github.com/Stealthhy7512/bittorrent-client/internal/metainfo"
+	"github.com/Stealthhy7512/bittorrent-client/internal/peerconn"
 	"github.com/Stealthhy7512/bittorrent-client/internal/tracker"
 )
 
@@ -198,7 +198,7 @@ func handshake(args []string) error {
 		addrs[i] = peer.Addr
 	}
 
-	result, err := download.DialFirst(ctx, addrs, torrent.InfoHash, peerID, download.DialOptions{
+	result, err := peerconn.DialFirst(ctx, addrs, torrent.InfoHash, peerID, peerconn.DialOptions{
 		MaxConcurrent:  4,
 		AttemptTimeout: 5 * time.Second,
 	})

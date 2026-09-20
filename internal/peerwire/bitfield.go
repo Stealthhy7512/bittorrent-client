@@ -57,3 +57,20 @@ func (b Bitfield) HasPiece(pieceIndex int) bool {
 
 	return (b.bits[byteIndex] & mask) == mask
 }
+
+func (b *Bitfield) SetPiece(pieceIndex int) error {
+	if pieceIndex < 0 {
+		return errors.New("piece index cannot be negative")
+	}
+
+	if pieceIndex >= b.pieceCount {
+		return fmt.Errorf("piece index %v is out of range %v", pieceIndex, b.pieceCount)
+	}
+
+	byteIndex := pieceIndex / 8
+	bitIndex := pieceIndex % 8
+	mask := byte(1 << (7 - bitIndex))
+
+	b.bits[byteIndex] |= mask
+	return nil
+}

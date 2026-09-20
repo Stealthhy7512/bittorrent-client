@@ -10,7 +10,7 @@ import (
 
 func TestMessageWriteToCompletesShortWrites(t *testing.T) {
 	w := &shortWriter{limit: 2}
-	message := Message{ID: Interested}
+	message := Message{ID: MessageInterested}
 	want := []byte{0, 0, 0, 1, 2}
 
 	n, err := message.WriteTo(w)
@@ -28,7 +28,7 @@ func TestMessageWriteToCompletesShortWrites(t *testing.T) {
 func TestMessageWriteToIncludesPayload(t *testing.T) {
 	var w bytes.Buffer
 	message := Message{
-		ID:      Have,
+		ID:      MessageHave,
 		Payload: []byte{0, 0, 0, 5},
 	}
 	want := []byte{
@@ -75,8 +75,8 @@ func TestReadMessageReadsInterested(t *testing.T) {
 	if got == nil {
 		t.Fatal("ReadMessage() = nil, want interested message")
 	}
-	if got.ID != Interested {
-		t.Fatalf("Message ID = %d, want %d", got.ID, Interested)
+	if got.ID != MessageInterested {
+		t.Fatalf("Message ID = %d, want %d", got.ID, MessageInterested)
 	}
 	if len(got.Payload) != 0 {
 		t.Fatalf("Payload = %v, want empty payload", got.Payload)
@@ -98,8 +98,8 @@ func TestReadMessageReadsPayload(t *testing.T) {
 	if got == nil {
 		t.Fatal("ReadMessage() = nil, want have message")
 	}
-	if got.ID != Have {
-		t.Fatalf("Message ID = %d, want %d", got.ID, Have)
+	if got.ID != MessageHave {
+		t.Fatalf("Message ID = %d, want %d", got.ID, MessageHave)
 	}
 	if !bytes.Equal(got.Payload, wantPayload) {
 		t.Fatalf("Payload = %v, want %v", got.Payload, wantPayload)
@@ -143,7 +143,7 @@ func TestReadMessageConsumesOneFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first ReadMessage() error = %v", err)
 	}
-	if first == nil || first.ID != Interested {
+	if first == nil || first.ID != MessageInterested {
 		t.Fatalf("first ReadMessage() = %#v, want interested message", first)
 	}
 
@@ -151,7 +151,7 @@ func TestReadMessageConsumesOneFrame(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second ReadMessage() error = %v", err)
 	}
-	if second == nil || second.ID != Choke {
+	if second == nil || second.ID != MessageChoke {
 		t.Fatalf("second ReadMessage() = %#v, want choke message", second)
 	}
 }

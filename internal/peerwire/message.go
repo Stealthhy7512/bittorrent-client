@@ -9,15 +9,15 @@ import (
 type MessageID byte
 
 const (
-	Choke         MessageID = 0
-	Unchoke       MessageID = 1
-	Interested    MessageID = 2
-	NotInterested MessageID = 3
-	Have          MessageID = 4
-	Bitfield      MessageID = 5
-	Request       MessageID = 6
-	Piece         MessageID = 7
-	Cancel        MessageID = 8
+	MessageChoke         MessageID = 0
+	MessageUnchoke       MessageID = 1
+	MessageInterested    MessageID = 2
+	MessageNotInterested MessageID = 3
+	MessageHave          MessageID = 4
+	MessageBitfield      MessageID = 5
+	MessageRequest       MessageID = 6
+	MessagePiece         MessageID = 7
+	MessageCancel        MessageID = 8
 )
 
 type Message struct {
@@ -79,7 +79,7 @@ func newHave(idx uint32) Message {
 	payload := make([]byte, uint32Size)
 	binary.BigEndian.PutUint32(payload[:], idx)
 	return Message{
-		ID:      Have,
+		ID:      MessageHave,
 		Payload: payload,
 	}
 }
@@ -91,7 +91,7 @@ func newRequest(idx uint32, begin uint32, length uint32) Message {
 	binary.BigEndian.PutUint32(payload[2*uint32Size:3*uint32Size], length)
 
 	return Message{
-		ID:      Request,
+		ID:      MessageRequest,
 		Payload: payload,
 	}
 }
@@ -103,7 +103,7 @@ func newPiece(idx uint32, begin uint32, block []byte) Message {
 	copy(payload[2*uint32Size:], block)
 
 	return Message{
-		ID:      Piece,
+		ID:      MessagePiece,
 		Payload: payload,
 	}
 }

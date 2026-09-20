@@ -42,7 +42,7 @@ func TestDialHonorsCancellationDuringHandshake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	dialDone := make(chan error, 1)
 	go func() {
-		conn, _, err := Dial(ctx, addr, [20]byte{1}, [20]byte{2})
+		conn, _, err := dial(ctx, addr, [20]byte{1}, [20]byte{2})
 		if conn != nil {
 			conn.Close()
 		}

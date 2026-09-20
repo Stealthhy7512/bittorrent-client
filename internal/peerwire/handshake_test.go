@@ -5,11 +5,6 @@ import (
 	"testing"
 )
 
-type shortWriter struct {
-	bytes.Buffer
-	limit int
-}
-
 func (w *shortWriter) Write(p []byte) (int, error) {
 	if len(p) > w.limit {
 		p = p[:w.limit]

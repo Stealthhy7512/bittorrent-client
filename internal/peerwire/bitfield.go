@@ -11,6 +11,25 @@ type Bitfield struct {
 	pieceCount int
 }
 
+func NewBitfield(pieceCount int) (Bitfield, error) {
+	if pieceCount < 0 {
+		return Bitfield{}, fmt.Errorf(
+			"piece count cannot be negative: %v",
+			pieceCount,
+		)
+	}
+
+	payloadLength := pieceCount / 8
+	if pieceCount%8 != 0 {
+		payloadLength++
+	}
+
+	return Bitfield{
+		bits:       make([]byte, payloadLength),
+		pieceCount: pieceCount,
+	}, nil
+}
+
 func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
 	if pieceCount < 0 {
 		return Bitfield{}, fmt.Errorf("piece count cannot be negative: %v", pieceCount)

@@ -2,6 +2,7 @@ package peerwire
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"strings"
@@ -65,25 +66,23 @@ func TestWriteKeepAliveWritesZeroLengthPrefix(t *testing.T) {
 	}
 }
 
-func TestReadMessageReadsInterested(t *testing.T) {
+func TestReadFrameReadsInterested(t *testing.T) {
 	input := []byte{0, 0, 0, 1, 2}
 
-	got, err := ReadMessage(bytes.NewReader(input))
+	got, err := ReadFrame(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ReadMessage() error = %v", err)
+		t.Fatalf("ReadFrame() error = %v", err)
 	}
-	if got == nil {
-		t.Fatal("ReadMessage() = nil, want interested message")
+	message := requireMessageFrame(t, got)
+	if message.ID != MessageInterested {
+		t.Fatalf("Message ID = %d, want %d", message.ID, MessageInterested)
 	}
-	if got.ID != MessageInterested {
-		t.Fatalf("Message ID = %d, want %d", got.ID, MessageInterested)
-	}
-	if len(got.Payload) != 0 {
-		t.Fatalf("Payload = %v, want empty payload", got.Payload)
+	if len(message.Payload) != 0 {
+		t.Fatalf("Payload = %v, want empty payload", message.Payload)
 	}
 }
 
-func TestReadMessageReadsPayload(t *testing.T) {
+func TestReadFrameReadsPayload(t *testing.T) {
 	input := []byte{
 		0, 0, 0, 5,
 		4,
@@ -91,76 +90,137 @@ func TestReadMessageReadsPayload(t *testing.T) {
 	}
 	wantPayload := []byte{0, 0, 0, 5}
 
-	got, err := ReadMessage(bytes.NewReader(input))
+	got, err := ReadFrame(bytes.NewReader(input))
 	if err != nil {
-		t.Fatalf("ReadMessage() error = %v", err)
+		t.Fatalf("ReadFrame() error = %v", err)
 	}
-	if got == nil {
-		t.Fatal("ReadMessage() = nil, want have message")
+	message := requireMessageFrame(t, got)
+	if message.ID != MessageHave {
+		t.Fatalf("Message ID = %d, want %d", message.ID, MessageHave)
 	}
-	if got.ID != MessageHave {
-		t.Fatalf("Message ID = %d, want %d", got.ID, MessageHave)
-	}
-	if !bytes.Equal(got.Payload, wantPayload) {
-		t.Fatalf("Payload = %v, want %v", got.Payload, wantPayload)
+	if !bytes.Equal(message.Payload, wantPayload) {
+		t.Fatalf("Payload = %v, want %v", message.Payload, wantPayload)
 	}
 }
 
-func TestReadMessageRecognizesKeepAlive(t *testing.T) {
-	got, err := ReadMessage(bytes.NewReader([]byte{0, 0, 0, 0}))
+func TestReadFrameRecognizesKeepAlive(t *testing.T) {
+	got, err := ReadFrame(bytes.NewReader([]byte{0, 0, 0, 0}))
 	if err != nil {
-		t.Fatalf("ReadMessage() error = %v", err)
+		t.Fatalf("ReadFrame() error = %v", err)
 	}
-	if got != nil {
-		t.Fatalf("ReadMessage() = %#v, want nil keep-alive", got)
+	if !got.IsKeepAlive() {
+		t.Fatalf("ReadFrame() = %#v, want keep-alive frame", got)
+	}
+	if _, ok := got.Message(); ok {
+		t.Fatal("Message() ok = true for keep-alive, want false")
 	}
 }
 
-func TestReadMessageRejectsTruncatedLength(t *testing.T) {
-	_, err := ReadMessage(bytes.NewReader([]byte{0, 0}))
+func TestReadFrameRejectsTruncatedLength(t *testing.T) {
+	_, err := ReadFrame(bytes.NewReader([]byte{0, 0}))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("ReadMessage() error = %v, want io.ErrUnexpectedEOF", err)
+		t.Fatalf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
 
-func TestReadMessageRejectsTruncatedBody(t *testing.T) {
+func TestReadFrameRejectsTruncatedBody(t *testing.T) {
 	input := []byte{0, 0, 0, 5, 4, 0, 0}
 
-	_, err := ReadMessage(bytes.NewReader(input))
+	_, err := ReadFrame(bytes.NewReader(input))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("ReadMessage() error = %v, want io.ErrUnexpectedEOF", err)
+		t.Fatalf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
 
-func TestReadMessageConsumesOneFrame(t *testing.T) {
+func TestReadFrameConsumesOneFrame(t *testing.T) {
 	input := []byte{
 		0, 0, 0, 1, 2,
 		0, 0, 0, 1, 0,
 	}
 	r := bytes.NewReader(input)
 
-	first, err := ReadMessage(r)
+	first, err := ReadFrame(r)
 	if err != nil {
-		t.Fatalf("first ReadMessage() error = %v", err)
+		t.Fatalf("first ReadFrame() error = %v", err)
 	}
-	if first == nil || first.ID != MessageInterested {
-		t.Fatalf("first ReadMessage() = %#v, want interested message", first)
+	firstMessage := requireMessageFrame(t, first)
+	if firstMessage.ID != MessageInterested {
+		t.Fatalf("first ReadFrame() = %#v, want interested message", first)
 	}
 
-	second, err := ReadMessage(r)
+	second, err := ReadFrame(r)
 	if err != nil {
-		t.Fatalf("second ReadMessage() error = %v", err)
+		t.Fatalf("second ReadFrame() error = %v", err)
 	}
-	if second == nil || second.ID != MessageChoke {
-		t.Fatalf("second ReadMessage() = %#v, want choke message", second)
+	secondMessage := requireMessageFrame(t, second)
+	if secondMessage.ID != MessageChoke {
+		t.Fatalf("second ReadFrame() = %#v, want choke message", second)
 	}
 }
 
-func TestReadMessageRejectsOversizedMessage(t *testing.T) {
+func TestReadFrameRejectsOversizedMessage(t *testing.T) {
 	input := []byte{0, 16, 0, 1} // 1 MiB + 1 byte.
 
-	_, err := ReadMessage(bytes.NewReader(input))
+	_, err := ReadFrame(bytes.NewReader(input))
 	if err == nil || !strings.Contains(err.Error(), "exceeds max") {
-		t.Fatalf("ReadMessage() error = %v, want maximum-length error", err)
+		t.Fatalf("ReadFrame() error = %v, want maximum-length error", err)
 	}
+}
+
+func TestParseHave(t *testing.T) {
+	payload := make([]byte, uint32Size)
+	binary.BigEndian.PutUint32(payload, 258)
+
+	got, err := ParseHave(Message{ID: MessageHave, Payload: payload})
+	if err != nil {
+		t.Fatalf("ParseHave() error = %v", err)
+	}
+	if got != 258 {
+		t.Fatalf("ParseHave() = %d, want 258", got)
+	}
+}
+
+func TestParseHaveRejectsInvalidMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		message Message
+	}{
+		{
+			name:    "wrong message ID",
+			message: Message{ID: MessageRequest, Payload: make([]byte, uint32Size)},
+		},
+		{
+			name:    "empty payload",
+			message: Message{ID: MessageHave},
+		},
+		{
+			name:    "short payload",
+			message: Message{ID: MessageHave, Payload: make([]byte, uint32Size-1)},
+		},
+		{
+			name:    "long payload",
+			message: Message{ID: MessageHave, Payload: make([]byte, uint32Size+1)},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := ParseHave(test.message); err == nil {
+				t.Fatal("ParseHave() error = nil, want invalid-message error")
+			}
+		})
+	}
+}
+
+func requireMessageFrame(t *testing.T, frame Frame) Message {
+	t.Helper()
+
+	if frame.IsKeepAlive() {
+		t.Fatal("frame is keep-alive, want message frame")
+	}
+	message, ok := frame.Message()
+	if !ok {
+		t.Fatal("Message() ok = false, want true")
+	}
+	return message
 }

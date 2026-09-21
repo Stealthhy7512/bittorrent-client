@@ -27,6 +27,18 @@ type Message struct {
 
 const uint32Size = 4
 
+type Frame struct {
+	kind    frameKind
+	message Message
+}
+
+type frameKind byte
+
+const (
+	frameKeepAlive frameKind = iota
+	frameMessage
+)
+
 func (m Message) WriteTo(w io.Writer) (int64, error) {
 	length := 1 + len(m.Payload)
 
@@ -38,33 +50,49 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 	return writeFull(w, buf)
 }
 
-func ReadMessage(r io.Reader) (*Message, error) {
-	var pref [uint32Size]byte
-	if _, err := io.ReadFull(r, pref[:]); err != nil {
-		return nil, fmt.Errorf("read msg length: %w", err)
+func (f Frame) IsKeepAlive() bool {
+	return f.kind == frameKeepAlive
+}
+
+func (f Frame) Message() (Message, bool) {
+	if f.kind != frameMessage {
+		return Message{}, false
+	}
+	return f.message, true
+}
+
+func ReadFrame(r io.Reader) (Frame, error) {
+	var prefix [uint32Size]byte
+	if _, err := io.ReadFull(r, prefix[:]); err != nil {
+		return Frame{}, fmt.Errorf("read msg length: %w", err)
 	}
 
-	length := binary.BigEndian.Uint32(pref[:])
+	length := binary.BigEndian.Uint32(prefix[:])
 
 	// keep-alive
 	if length == 0 {
-		return nil, nil
+		return Frame{
+			kind: frameKeepAlive,
+		}, nil
 	}
 
 	const maxMsgLen uint32 = 1 << 20
 	if length > maxMsgLen {
-		return nil, fmt.Errorf("msg length %d exceeds max length %d", length, maxMsgLen)
+		return Frame{}, fmt.Errorf("msg length %d exceeds max length %d", length, maxMsgLen)
 
 	}
 
 	body := make([]byte, int(length))
 	if _, err := io.ReadFull(r, body); err != nil {
-		return nil, fmt.Errorf("read msg body: %w", err)
+		return Frame{}, fmt.Errorf("read msg body: %w", err)
 	}
 
-	return &Message{
-		ID:      MessageID(body[0]),
-		Payload: body[1:],
+	return Frame{
+		kind: frameMessage,
+		message: Message{
+			ID:      MessageID(body[0]),
+			Payload: body[1:],
+		},
 	}, nil
 }
 
@@ -75,6 +103,25 @@ func WriteKeepAlive(w io.Writer) (int64, error) {
 	return writeFull(w, buf)
 }
 
+func ParseHave(message Message) (pieceIndex uint32, err error) {
+	if message.ID != MessageHave {
+		return 0, fmt.Errorf(
+			"parse have: message ID is %v, want %v",
+			message.ID,
+			MessageHave,
+		)
+	}
+
+	if len(message.Payload) != uint32Size {
+		return 0, fmt.Errorf(
+			"parse have: payload length is %v, want %v",
+			len(message.Payload),
+			uint32Size,
+		)
+	}
+
+	return binary.BigEndian.Uint32(message.Payload), nil
+}
 func newHave(idx uint32) Message {
 	payload := make([]byte, uint32Size)
 	binary.BigEndian.PutUint32(payload[:], idx)

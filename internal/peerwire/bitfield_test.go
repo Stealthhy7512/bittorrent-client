@@ -5,6 +5,31 @@ import (
 	"testing"
 )
 
+func TestNewBitfieldStartsEmpty(t *testing.T) {
+	bitfield, err := NewBitfield(9)
+	if err != nil {
+		t.Fatalf("NewBitfield() error = %v", err)
+	}
+
+	for pieceIndex := range 9 {
+		if bitfield.HasPiece(pieceIndex) {
+			t.Fatalf("HasPiece(%d) = true, want false", pieceIndex)
+		}
+	}
+	if err := bitfield.SetPiece(8); err != nil {
+		t.Fatalf("SetPiece(8) error = %v", err)
+	}
+	if !bitfield.HasPiece(8) {
+		t.Fatal("HasPiece(8) = false after SetPiece(8), want true")
+	}
+}
+
+func TestNewBitfieldRejectsNegativePieceCount(t *testing.T) {
+	if _, err := NewBitfield(-1); err == nil {
+		t.Fatal("NewBitfield() error = nil, want negative-piece-count error")
+	}
+}
+
 func TestBitfieldHasPieceUsesHighBitFirst(t *testing.T) {
 	bitfield, err := ParseBitfield([]byte{0b10100001}, 8)
 	if err != nil {

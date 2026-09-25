@@ -6,6 +6,12 @@ import (
 	"io"
 )
 
+const (
+	// MaxBlockSize is the largest block allowed in `Request` and `Piece` messages.
+	MaxBlockSize = 16 * 1024
+	uint32Size   = 4
+)
+
 type MessageID byte
 
 const (
@@ -25,19 +31,17 @@ type Message struct {
 	Payload []byte
 }
 
-const uint32Size = 4
-
-type Frame struct {
-	kind    frameKind
-	message Message
-}
-
 type frameKind byte
 
 const (
 	frameKeepAlive frameKind = iota
 	frameMessage
 )
+
+type Frame struct {
+	kind    frameKind
+	message Message
+}
 
 func (m Message) WriteTo(w io.Writer) (int64, error) {
 	length := 1 + len(m.Payload)
@@ -48,17 +52,6 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 	copy(buf[5:], m.Payload)
 
 	return writeFull(w, buf)
-}
-
-func (f Frame) IsKeepAlive() bool {
-	return f.kind == frameKeepAlive
-}
-
-func (f Frame) Message() (Message, bool) {
-	if f.kind != frameMessage {
-		return Message{}, false
-	}
-	return f.message, true
 }
 
 func ReadFrame(r io.Reader) (Frame, error) {
@@ -96,11 +89,31 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	}, nil
 }
 
+func (f Frame) Message() (Message, bool) {
+	if f.kind != frameMessage {
+		return Message{}, false
+	}
+	return f.message, true
+}
+
 func WriteKeepAlive(w io.Writer) (int64, error) {
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint32(buf, 0)
 
 	return writeFull(w, buf)
+}
+
+func (f Frame) IsKeepAlive() bool {
+	return f.kind == frameKeepAlive
+}
+
+func newHave(pieceIndex uint32) Message {
+	payload := make([]byte, uint32Size)
+	binary.BigEndian.PutUint32(payload[:], pieceIndex)
+	return Message{
+		ID:      MessageHave,
+		Payload: payload,
+	}
 }
 
 func ParseHave(message Message) (pieceIndex uint32, err error) {
@@ -122,18 +135,10 @@ func ParseHave(message Message) (pieceIndex uint32, err error) {
 
 	return binary.BigEndian.Uint32(message.Payload), nil
 }
-func newHave(idx uint32) Message {
-	payload := make([]byte, uint32Size)
-	binary.BigEndian.PutUint32(payload[:], idx)
-	return Message{
-		ID:      MessageHave,
-		Payload: payload,
-	}
-}
 
-func newRequest(idx uint32, begin uint32, length uint32) Message {
+func newRequest(pieceIndex uint32, begin uint32, length uint32) Message {
 	payload := make([]byte, 3*uint32Size)
-	binary.BigEndian.PutUint32(payload[:uint32Size], idx)
+	binary.BigEndian.PutUint32(payload[:uint32Size], pieceIndex)
 	binary.BigEndian.PutUint32(payload[uint32Size:2*uint32Size], begin)
 	binary.BigEndian.PutUint32(payload[2*uint32Size:3*uint32Size], length)
 
@@ -143,9 +148,9 @@ func newRequest(idx uint32, begin uint32, length uint32) Message {
 	}
 }
 
-func newPiece(idx uint32, begin uint32, block []byte) Message {
+func newPiece(pieceIndex uint32, begin uint32, block []byte) Message {
 	payload := make([]byte, 2*uint32Size+len(block))
-	binary.BigEndian.PutUint32(payload[:uint32Size], idx)
+	binary.BigEndian.PutUint32(payload[:uint32Size], pieceIndex)
 	binary.BigEndian.PutUint32(payload[uint32Size:2*uint32Size], begin)
 	copy(payload[2*uint32Size:], block)
 
@@ -153,4 +158,36 @@ func newPiece(idx uint32, begin uint32, block []byte) Message {
 		ID:      MessagePiece,
 		Payload: payload,
 	}
+}
+
+func ParsePiece(message Message) (pieceIndex uint32, begin uint32, block []byte, err error) {
+	if message.ID != MessagePiece {
+		return 0, 0, nil, fmt.Errorf(
+			"parse piece: message ID is %v, want %v",
+			message.ID,
+			MessagePiece,
+		)
+	}
+
+	if len(message.Payload) < 2*uint32Size {
+		return 0, 0, nil, fmt.Errorf(
+			"parse piece: payload length is %v, want at least %v",
+			len(message.Payload),
+			uint32Size*2,
+		)
+	}
+
+	pieceIndex = binary.BigEndian.Uint32(message.Payload[:uint32Size])
+	begin = binary.BigEndian.Uint32(message.Payload[uint32Size : uint32Size*2])
+	block = message.Payload[uint32Size*2:]
+
+	if len(block) > MaxBlockSize {
+		return 0, 0, nil, fmt.Errorf(
+			"parse piece: block size %v, max allowed block size: %v",
+			len(block),
+			MaxBlockSize,
+		)
+	}
+
+	return pieceIndex, begin, block, nil
 }

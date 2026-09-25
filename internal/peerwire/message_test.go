@@ -212,6 +212,74 @@ func TestParseHaveRejectsInvalidMessage(t *testing.T) {
 	}
 }
 
+func TestParsePiece(t *testing.T) {
+	payload := make([]byte, 2*uint32Size+MaxBlockSize)
+	binary.BigEndian.PutUint32(payload[:uint32Size], 258)
+	binary.BigEndian.PutUint32(payload[uint32Size:2*uint32Size], 16*1024)
+	for i := 2 * uint32Size; i < len(payload); i++ {
+		payload[i] = byte(i)
+	}
+	wantBlock := payload[2*uint32Size:]
+
+	pieceIndex, begin, block, err := ParsePiece(Message{
+		ID:      MessagePiece,
+		Payload: payload,
+	})
+	if err != nil {
+		t.Fatalf("ParsePiece() error = %v", err)
+	}
+	if pieceIndex != 258 {
+		t.Fatalf("ParsePiece() piece index = %d, want 258", pieceIndex)
+	}
+	if begin != 16*1024 {
+		t.Fatalf("ParsePiece() begin = %d, want %d", begin, 16*1024)
+	}
+	if !bytes.Equal(block, wantBlock) {
+		t.Fatalf("ParsePiece() block differs from input block")
+	}
+}
+
+func TestParsePieceRejectsInvalidMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		message Message
+	}{
+		{
+			name: "wrong message ID",
+			message: Message{
+				ID:      MessageRequest,
+				Payload: make([]byte, 2*uint32Size),
+			},
+		},
+		{
+			name:    "empty payload",
+			message: Message{ID: MessagePiece},
+		},
+		{
+			name: "short header",
+			message: Message{
+				ID:      MessagePiece,
+				Payload: make([]byte, 2*uint32Size-1),
+			},
+		},
+		{
+			name: "oversized block",
+			message: Message{
+				ID:      MessagePiece,
+				Payload: make([]byte, 2*uint32Size+MaxBlockSize+1),
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, _, err := ParsePiece(test.message); err == nil {
+				t.Fatal("ParsePiece() error = nil, want invalid-message error")
+			}
+		})
+	}
+}
+
 func requireMessageFrame(t *testing.T, frame Frame) Message {
 	t.Helper()
 

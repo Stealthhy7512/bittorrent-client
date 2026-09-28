@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
@@ -15,21 +14,17 @@ import (
 
 // DialOptions controls how peers are attempted.
 type DialOptions struct {
-	MaxConcurrent  int
+	// MaxConcurrent must be between one and four.
+	MaxConcurrent int
+	// AttemptTimeout limits one endpoint's dial and handshake attempt.
 	AttemptTimeout time.Duration
 }
 
-// DialResult is the first peer connection that completes a valid handshake.
+// DialResult is a peer connection that completed a valid handshake.
 type DialResult struct {
 	Conn      net.Conn
 	Addr      netip.AddrPort
 	Handshake peerwire.Handshake
-}
-
-// dialResult wraps `DialResult` with local errors for worker processing.
-type dialResult struct {
-	DialResult
-	err error
 }
 
 func DialFirst(
@@ -39,79 +34,12 @@ func DialFirst(
 	peerID [20]byte,
 	options DialOptions,
 ) (DialResult, error) {
-	if len(addrs) == 0 {
-		return DialResult{}, errors.New("no peers returned")
+	pool, err := NewPool(ctx, addrs, infoHash, peerID, options)
+	if err != nil {
+		return DialResult{}, err
 	}
-	if options.MaxConcurrent <= 0 {
-		return DialResult{}, errors.New("maximum concurrent dials must be positive")
-	}
-	if options.AttemptTimeout <= 0 {
-		return DialResult{}, errors.New("peer attempt timeout must be positive")
-	}
-
-	workerCount := min(options.MaxConcurrent, len(addrs))
-	dialCtx, cancelDials := context.WithCancel(ctx)
-	defer cancelDials()
-
-	jobs := make(chan netip.AddrPort)
-	results := make(chan dialResult)
-	var workers sync.WaitGroup
-
-	for range workerCount {
-		workers.Go(func() {
-			for addr := range jobs {
-				attemptCtx, cancelAttempt := context.WithTimeout(dialCtx, options.AttemptTimeout)
-				conn, handshake, err := dial(attemptCtx, addr, infoHash, peerID)
-				cancelAttempt()
-				results <- dialResult{
-					DialResult: DialResult{Conn: conn, Addr: addr, Handshake: handshake},
-					err:        err,
-				}
-			}
-		})
-	}
-
-	go func() {
-		defer close(jobs)
-		for _, addr := range addrs {
-			select {
-			case jobs <- addr:
-			case <-dialCtx.Done():
-				return
-			}
-		}
-	}()
-
-	go func() {
-		workers.Wait()
-		close(results)
-	}()
-
-	var winner *DialResult
-	var dialErrors []error
-	for result := range results {
-		if result.err == nil {
-			if winner == nil {
-				won := result.DialResult
-				winner = &won
-				cancelDials()
-			} else {
-				result.Conn.Close()
-			}
-			continue
-		}
-		if !errors.Is(result.err, context.Canceled) {
-			dialErrors = append(dialErrors, fmt.Errorf("%s: %w", result.Addr, result.err))
-		}
-	}
-
-	if winner != nil {
-		return *winner, nil
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return DialResult{}, ctxErr
-	}
-	return DialResult{}, errors.Join(dialErrors...)
+	defer pool.Close()
+	return pool.Next()
 }
 
 func dial(

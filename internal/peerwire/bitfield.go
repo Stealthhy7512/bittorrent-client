@@ -3,6 +3,7 @@ package peerwire
 import (
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 )
 
@@ -28,6 +29,13 @@ func NewBitfield(pieceCount int) (Bitfield, error) {
 		bits:       make([]byte, payloadLength),
 		pieceCount: pieceCount,
 	}, nil
+}
+
+func WriteBitfield(w io.Writer, bitfield Bitfield) (int64, error) {
+	return Message{
+		ID:      MessageBitfield,
+		Payload: bitfield.bits,
+	}.WriteTo(w)
 }
 
 func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {

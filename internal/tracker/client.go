@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// Announce sends one HTTP tracker request using ctx for cancellation and returns
+// the decoded response. A nil HTTPClient uses a five-second client timeout.
+// Non-2xx responses and tracker failure messages become errors, and decoding
+// reads at most 2 MiB of the response body.
 func (c *Client) Announce(
 	ctx context.Context,
 	trackerURL string,
@@ -52,6 +56,8 @@ func (c *Client) Announce(
 	return decodeAnnounceResponse(io.LimitReader(res.Body, 2<<20))
 }
 
+// buildTrackerURL merges announce fields into the tracker's existing query.
+// The info hash and peer ID are encoded as raw bytes in query values, not hex.
 func buildTrackerURL(trackerURL string, r AnnounceRequest) (string, error) {
 	base, err := url.Parse(trackerURL)
 	if err != nil {

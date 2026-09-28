@@ -11,6 +11,9 @@ import (
 	"github.com/jackpal/bencode-go"
 )
 
+// decodeAnnounceResponse checks tracker failures before decoding the interval
+// and peers. Both compact byte strings and dictionary peer lists are accepted;
+// the caller is responsible for bounding reads from body.
 func decodeAnnounceResponse(body io.Reader) (AnnounceResponse, error) {
 	rawPeers, err := bencode.Decode(body)
 	if err != nil {
@@ -62,6 +65,8 @@ func decodeAnnounceResponse(body io.Reader) (AnnounceResponse, error) {
 	return res, nil
 }
 
+// parseCompactPeers decodes six-byte IPv4 endpoints: four address bytes followed
+// by a big-endian port. Compact responses do not include peer IDs.
 func parseCompactPeers(rawPeers string) ([]Peer, error) {
 	if len(rawPeers)%6 != 0 {
 		return nil, errors.New("peers length not a multiple of 6-bytes")
@@ -83,6 +88,8 @@ func parseCompactPeers(rawPeers string) ([]Peer, error) {
 	return peers, nil
 }
 
+// parseDictPeers validates dictionary endpoints and optional 20-byte peer IDs.
+// Addresses must be IP literals; this function does not resolve hostnames.
 func parseDictPeers(rawPeers []any) ([]Peer, error) {
 	peers := make([]Peer, 0, len(rawPeers))
 
@@ -154,6 +161,8 @@ func parsePeerID(rawID any) (*[20]byte, error) {
 	return &id, nil
 }
 
+// parseInterval converts positive tracker seconds to a duration, checking the
+// upper bound before multiplication can overflow time.Duration.
 func parseInterval(rawInterval any) (time.Duration, error) {
 	var seconds uint64
 	switch value := rawInterval.(type) {

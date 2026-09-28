@@ -37,7 +37,9 @@ type rawMetaInfo struct {
 	Info     bencode.RawMessage `bencode:"info"`
 }
 
-// Open reads and parses a .torrent metainfo file.
+// Open reads a .torrent metainfo file and validates its single-file piece layout.
+// The info hash is computed from the original bencoded info bytes, since
+// decoding and re-encoding them could change the torrent's identity.
 func Open(path string) (TorrentFile, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -64,6 +66,9 @@ func Open(path string) (TorrentFile, error) {
 	return meta.toTorrentFile(infoHash)
 }
 
+// toTorrentFile checks the declared content length, piece length, and hash count
+// before exposing the layout. An empty file requires zero piece hashes; a final
+// partial piece requires one hash just like a full piece.
 func (meta metaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
 	if meta.Info.PieceLength <= 0 {
 		return TorrentFile{}, errors.New("piece length must be positive")
@@ -100,6 +105,8 @@ func (meta metaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
 	}, nil
 }
 
+// splitPieceHashes separates the concatenated SHA-1 digests, rejecting a trailing
+// partial digest. It does not check how many pieces the content should contain.
 func (info info) splitPieceHashes() ([][20]byte, error) {
 	const hashLength = 20
 

@@ -1,3 +1,3 @@
-// Package peerwire defines a `Handshake` type, implements building a Handshake from bytes,
-// reading it and writing a handshake to a buffer.
+// Package peerwire encodes, decodes, and structurally validates BitTorrent v1
+// handshakes, message frames, and piece-availability bitfields.
 package peerwire

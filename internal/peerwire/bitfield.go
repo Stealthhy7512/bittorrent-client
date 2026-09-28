@@ -7,6 +7,8 @@ import (
 	"slices"
 )
 
+// Bitfield stores piece availability in high-bit-first wire order. Its zero
+// value represents zero pieces.
 type Bitfield struct {
 	bits       []byte
 	pieceCount int
@@ -20,6 +22,7 @@ func NewBitfield(pieceCount int) (Bitfield, error) {
 		)
 	}
 
+	// compute minimum required bytes to fit in bits
 	payloadLength := pieceCount / 8
 	if pieceCount%8 != 0 {
 		payloadLength++
@@ -31,6 +34,8 @@ func NewBitfield(pieceCount int) (Bitfield, error) {
 	}, nil
 }
 
+// WriteBitfield writes the supplied availability set as a framed Bitfield
+// message. It neither changes the set nor decides when advertising is allowed.
 func WriteBitfield(w io.Writer, bitfield Bitfield) (int64, error) {
 	return Message{
 		ID:      MessageBitfield,
@@ -38,6 +43,10 @@ func WriteBitfield(w io.Writer, bitfield Bitfield) (int64, error) {
 	}.WriteTo(w)
 }
 
+// ParseBitfield reads a bitstream containing a bitfield, validates and returns a
+// `Bitfield` object with copied underlying bits.
+//
+// Exact piece count is needed to parse correctly.
 func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
 	if pieceCount < 0 {
 		return Bitfield{}, fmt.Errorf("piece count cannot be negative: %v", pieceCount)
@@ -69,6 +78,7 @@ func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
 	}, nil
 }
 
+// HasPiece reports availability, returning false for an out-of-range index.
 func (b Bitfield) HasPiece(pieceIndex int) bool {
 	if pieceIndex < 0 {
 		return false
@@ -85,6 +95,9 @@ func (b Bitfield) HasPiece(pieceIndex int) bool {
 	return (b.bits[byteIndex] & mask) == mask
 }
 
+// SetPiece marks an in-range piece available.
+//
+// SetPiece is idempotent.
 func (b *Bitfield) SetPiece(pieceIndex int) error {
 	if pieceIndex < 0 {
 		return errors.New("piece index cannot be negative")

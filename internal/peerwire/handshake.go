@@ -10,18 +10,24 @@ const protocolName = "BitTorrent protocol"
 const lenProtocolName = byte(len(protocolName))
 const handshakeSize = 49 + lenProtocolName
 
+// Handshake carries feature bits, a torrent's info hash, and the sender's peer ID.
 type Handshake struct {
 	Reserved [8]byte
 	InfoHash [20]byte
 	PeerID   [20]byte
 }
 
+// WriteTo writes the fixed BitTorrent handshake, completing short writes and
+// reporting the number of bytes written even on failure.
 func (h Handshake) WriteTo(w io.Writer) (int64, error) {
 	serialized := h.bytes()
 
 	return writeFull(w, serialized[:])
 }
 
+// ReadHandshake reads one handshake and validates the protocol name and length.
+// Reserved bits are preserved without interpretation. The caller must compare
+// the returned info hash with the torrent it intended to join.
 func ReadHandshake(r io.Reader) (Handshake, error) {
 	var length [1]byte
 	if _, err := io.ReadFull(r, length[:]); err != nil {
@@ -55,6 +61,7 @@ func ReadHandshake(r io.Reader) (Handshake, error) {
 	return hs, nil
 }
 
+// bytes converts a `Handshake` object into a byte stream.
 func (h Handshake) bytes() [handshakeSize]byte {
 	var buf [handshakeSize]byte
 

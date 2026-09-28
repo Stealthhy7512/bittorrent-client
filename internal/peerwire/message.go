@@ -27,6 +27,8 @@ const (
 	MessageCancel        MessageID = 8
 )
 
+// Message holds a message ID and its unframed payload. Direct construction does
+// not validate the payload; use the relevant constructor or parser for checks.
 type Message struct {
 	ID      MessageID
 	Payload []byte
@@ -44,6 +46,7 @@ type Frame struct {
 	message Message
 }
 
+// WriteTo writes the length prefix, ID, and payload, completing short writes.
 func (m Message) WriteTo(w io.Writer) (int64, error) {
 	length := 1 + len(m.Payload)
 
@@ -56,6 +59,13 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 	return writeFull(w, buf)
 }
 
+// ReadFrame reads one frame, rejecting declarations above 1 MiB. It checks
+// fixed-size core message lengths and the Piece block limit before allocating
+// the payload. Bitfield contents and Request fields require separate parsing.
+// Unknown IDs are currently returned with their payload intact.
+//
+// A rejected declaration may leave its payload unread. The caller must treat
+// that error as terminal for the stream rather than attempt another frame read.
 func ReadFrame(r io.Reader) (Frame, error) {
 	var prefix [uint32Size]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
@@ -84,7 +94,7 @@ func ReadFrame(r io.Reader) (Frame, error) {
 
 	messageID := MessageID(id[0])
 
-	// validate non-payload messages
+	// check message-specific lengths before allocating or reading the payload.
 	switch messageID {
 	case MessageChoke, MessageUnchoke,
 		MessageInterested, MessageNotInterested:
@@ -95,7 +105,6 @@ func ReadFrame(r io.Reader) (Frame, error) {
 				length,
 			)
 		}
-
 	case MessageHave:
 		if length != 5 {
 			return Frame{}, fmt.Errorf(
@@ -104,7 +113,6 @@ func ReadFrame(r io.Reader) (Frame, error) {
 				length,
 			)
 		}
-
 	case MessageBitfield:
 
 	case MessageRequest:
@@ -115,7 +123,6 @@ func ReadFrame(r io.Reader) (Frame, error) {
 				length,
 			)
 		}
-
 	case MessagePiece:
 		if length < 9 {
 			return Frame{}, fmt.Errorf(
@@ -133,7 +140,6 @@ func ReadFrame(r io.Reader) (Frame, error) {
 				MaxBlockSize,
 			)
 		}
-
 	case MessageCancel:
 		if length != 13 {
 			return Frame{}, fmt.Errorf(
@@ -143,8 +149,9 @@ func ReadFrame(r io.Reader) (Frame, error) {
 			)
 		}
 	}
-	body := make([]byte, int(length-1))
-	if _, err := io.ReadFull(r, body); err != nil {
+
+	payload := make([]byte, int(length-1)) // ID already read, decrement length
+	if _, err := io.ReadFull(r, payload); err != nil {
 		return Frame{}, fmt.Errorf("read msg body: %w", err)
 	}
 
@@ -152,11 +159,15 @@ func ReadFrame(r io.Reader) (Frame, error) {
 		kind: frameMessage,
 		message: Message{
 			ID:      messageID,
-			Payload: body,
+			Payload: payload,
 		},
 	}, nil
 }
 
+// Message returns the enclosed message, or false for a non-message frame kind. The returned
+// payload shares the frame's storage.
+//
+// Kept for handling unsupported frame kinds in the future.
 func (f Frame) Message() (Message, bool) {
 	if f.kind != frameMessage {
 		return Message{}, false
@@ -190,6 +201,8 @@ func WriteNotInterested(w io.Writer) (int64, error) {
 	return Message{ID: MessageNotInterested}.WriteTo(w)
 }
 
+// NewHave encodes an advertised piece index. Checking that the index exists in
+// the torrent is the session's responsibility.
 func NewHave(pieceIndex uint32) Message {
 	payload := make([]byte, uint32Size)
 	binary.BigEndian.PutUint32(payload[:], pieceIndex)
@@ -203,6 +216,8 @@ func WriteHave(w io.Writer, pieceIndex uint32) (int64, error) {
 	return NewHave(pieceIndex).WriteTo(w)
 }
 
+// ParseHave requires a Have ID and exactly four payload bytes, then decodes the
+// index. It does not check the index against a torrent's piece count.
 func ParseHave(message Message) (pieceIndex uint32, err error) {
 	if message.ID != MessageHave {
 		return 0, fmt.Errorf(
@@ -223,6 +238,9 @@ func ParseHave(message Message) (pieceIndex uint32, err error) {
 	return binary.BigEndian.Uint32(message.Payload), nil
 }
 
+// NewRequest encodes a block request with a length from 1 through MaxBlockSize.
+// begin is a byte offset within the piece. Torrent-specific index and range
+// checks are left to the session.
 func NewRequest(pieceIndex uint32, begin uint32, length uint32) (Message, error) {
 	if length == 0 {
 		return Message{}, errors.New("length cannot be zero")
@@ -242,6 +260,8 @@ func NewRequest(pieceIndex uint32, begin uint32, length uint32) (Message, error)
 	}, nil
 }
 
+// WriteRequest validates through NewRequest before writing any bytes, then
+// returns the framed byte count, including partial progress on a write error.
 func WriteRequest(w io.Writer, pieceIndex uint32, begin uint32, length uint32) (int64, error) {
 	message, err := NewRequest(pieceIndex, begin, length)
 	if err != nil {
@@ -250,6 +270,9 @@ func WriteRequest(w io.Writer, pieceIndex uint32, begin uint32, length uint32) (
 	return message.WriteTo(w)
 }
 
+// ParseRequest checks the Request ID, twelve-byte payload, and block-length
+// limits before returning its fields. The session checks the torrent-specific
+// piece index and byte range.
 func ParseRequest(message Message) (pieceIndex uint32, begin uint32, length uint32, err error) {
 	if message.ID != MessageRequest {
 		return 0, 0, 0, fmt.Errorf(
@@ -286,6 +309,9 @@ func ParseRequest(message Message) (pieceIndex uint32, begin uint32, length uint
 	return pieceIndex, begin, length, nil
 }
 
+// NewPiece encodes one block, copying its bytes so later changes to block do not
+// affect the message. It rejects blocks larger than MaxBlockSize; piece indexes,
+// offsets, and the expected response length are session-level checks.
 func NewPiece(pieceIndex uint32, begin uint32, block []byte) (Message, error) {
 	if len(block) > MaxBlockSize {
 		return Message{}, fmt.Errorf(
@@ -306,6 +332,7 @@ func NewPiece(pieceIndex uint32, begin uint32, block []byte) (Message, error) {
 	}, nil
 }
 
+// WritePiece validates through NewPiece before writing the framed block response.
 func WritePiece(w io.Writer, pieceIndex uint32, begin uint32, block []byte) (int64, error) {
 	piece, err := NewPiece(pieceIndex, begin, block)
 	if err != nil {
@@ -315,6 +342,9 @@ func WritePiece(w io.Writer, pieceIndex uint32, begin uint32, block []byte) (int
 	return piece.WriteTo(w)
 }
 
+// ParsePiece checks the Piece ID, eight-byte header, and maximum block size.
+// The returned block aliases message.Payload. Matching it to an outstanding
+// request, including its exact length, is the session's responsibility.
 func ParsePiece(message Message) (pieceIndex uint32, begin uint32, block []byte, err error) {
 	if message.ID != MessagePiece {
 		return 0, 0, nil, fmt.Errorf(

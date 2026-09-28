@@ -2,6 +2,7 @@ package peerwire
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -48,6 +49,7 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 
 	buf := make([]byte, uint32Size+length)
 	binary.BigEndian.PutUint32(buf[:uint32Size], uint32(length))
+
 	buf[4] = byte(m.ID)
 	copy(buf[5:], m.Payload)
 
@@ -75,7 +77,73 @@ func ReadFrame(r io.Reader) (Frame, error) {
 
 	}
 
-	body := make([]byte, int(length))
+	var id [1]byte
+	if _, err := io.ReadFull(r, id[:]); err != nil {
+		return Frame{}, fmt.Errorf("read message ID: %w", err)
+	}
+
+	messageID := MessageID(id[0])
+
+	// validate non-payload messages
+	switch messageID {
+	case MessageChoke, MessageUnchoke,
+		MessageInterested, MessageNotInterested:
+		if length != 1 {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want 1",
+				messageID,
+				length,
+			)
+		}
+
+	case MessageHave:
+		if length != 5 {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want 5",
+				messageID,
+				length,
+			)
+		}
+
+	case MessageBitfield:
+
+	case MessageRequest:
+		if length != 13 {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want 13",
+				messageID,
+				length,
+			)
+		}
+
+	case MessagePiece:
+		if length < 9 {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want at least 9",
+				messageID,
+				length,
+			)
+		}
+
+		if length > 9+MaxBlockSize {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want at most 9+%v",
+				messageID,
+				length,
+				MaxBlockSize,
+			)
+		}
+
+	case MessageCancel:
+		if length != 13 {
+			return Frame{}, fmt.Errorf(
+				"message %v: length %v, want 13",
+				messageID,
+				length,
+			)
+		}
+	}
+	body := make([]byte, int(length-1))
 	if _, err := io.ReadFull(r, body); err != nil {
 		return Frame{}, fmt.Errorf("read msg body: %w", err)
 	}
@@ -83,8 +151,8 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	return Frame{
 		kind: frameMessage,
 		message: Message{
-			ID:      MessageID(body[0]),
-			Payload: body[1:],
+			ID:      messageID,
+			Payload: body,
 		},
 	}, nil
 }
@@ -96,24 +164,43 @@ func (f Frame) Message() (Message, bool) {
 	return f.message, true
 }
 
+// WriteKeepAlive writes a zero-length keep-alive frame.
 func WriteKeepAlive(w io.Writer) (int64, error) {
-	buf := make([]byte, 4)
-	binary.BigEndian.PutUint32(buf, 0)
-
-	return writeFull(w, buf)
+	var buf [uint32Size]byte
+	return writeFull(w, buf[:])
 }
 
 func (f Frame) IsKeepAlive() bool {
 	return f.kind == frameKeepAlive
 }
 
-func newHave(pieceIndex uint32) Message {
+func WriteChoke(w io.Writer) (int64, error) {
+	return Message{ID: MessageChoke}.WriteTo(w)
+}
+
+func WriteUnchoke(w io.Writer) (int64, error) {
+	return Message{ID: MessageUnchoke}.WriteTo(w)
+}
+
+func WriteInterested(w io.Writer) (int64, error) {
+	return Message{ID: MessageInterested}.WriteTo(w)
+}
+
+func WriteNotInterested(w io.Writer) (int64, error) {
+	return Message{ID: MessageNotInterested}.WriteTo(w)
+}
+
+func NewHave(pieceIndex uint32) Message {
 	payload := make([]byte, uint32Size)
 	binary.BigEndian.PutUint32(payload[:], pieceIndex)
 	return Message{
 		ID:      MessageHave,
 		Payload: payload,
 	}
+}
+
+func WriteHave(w io.Writer, pieceIndex uint32) (int64, error) {
+	return NewHave(pieceIndex).WriteTo(w)
 }
 
 func ParseHave(message Message) (pieceIndex uint32, err error) {
@@ -136,7 +223,14 @@ func ParseHave(message Message) (pieceIndex uint32, err error) {
 	return binary.BigEndian.Uint32(message.Payload), nil
 }
 
-func newRequest(pieceIndex uint32, begin uint32, length uint32) Message {
+func NewRequest(pieceIndex uint32, begin uint32, length uint32) (Message, error) {
+	if length == 0 {
+		return Message{}, errors.New("length cannot be zero")
+	}
+	if length > MaxBlockSize {
+		return Message{}, fmt.Errorf("length %v greater than allowed: %v", length, MaxBlockSize)
+	}
+
 	payload := make([]byte, 3*uint32Size)
 	binary.BigEndian.PutUint32(payload[:uint32Size], pieceIndex)
 	binary.BigEndian.PutUint32(payload[uint32Size:2*uint32Size], begin)
@@ -145,10 +239,62 @@ func newRequest(pieceIndex uint32, begin uint32, length uint32) Message {
 	return Message{
 		ID:      MessageRequest,
 		Payload: payload,
-	}
+	}, nil
 }
 
-func newPiece(pieceIndex uint32, begin uint32, block []byte) Message {
+func WriteRequest(w io.Writer, pieceIndex uint32, begin uint32, length uint32) (int64, error) {
+	message, err := NewRequest(pieceIndex, begin, length)
+	if err != nil {
+		return 0, err
+	}
+	return message.WriteTo(w)
+}
+
+func ParseRequest(message Message) (pieceIndex uint32, begin uint32, length uint32, err error) {
+	if message.ID != MessageRequest {
+		return 0, 0, 0, fmt.Errorf(
+			"parse request: message ID is %v, want %v",
+			message.ID,
+			MessageRequest,
+		)
+	}
+
+	if len(message.Payload) != uint32Size*3 {
+		return 0, 0, 0, fmt.Errorf(
+			"parse request: payload length is %v, want %v",
+			len(message.Payload),
+			uint32Size*3,
+		)
+	}
+
+	pieceIndex = binary.BigEndian.Uint32(message.Payload[:uint32Size])
+	begin = binary.BigEndian.Uint32(message.Payload[uint32Size : uint32Size*2])
+	length = binary.BigEndian.Uint32(message.Payload[uint32Size*2 : uint32Size*3])
+
+	if length == 0 {
+		return 0, 0, 0, errors.New("parse request: length cannot be zero")
+	}
+
+	if length > MaxBlockSize {
+		return 0, 0, 0, fmt.Errorf(
+			"parse request: length is %v, max allowed length %v",
+			length,
+			MaxBlockSize,
+		)
+	}
+
+	return pieceIndex, begin, length, nil
+}
+
+func NewPiece(pieceIndex uint32, begin uint32, block []byte) (Message, error) {
+	if len(block) > MaxBlockSize {
+		return Message{}, fmt.Errorf(
+			"new piece: block size %v, max allowed block size %v",
+			len(block),
+			MaxBlockSize,
+		)
+	}
+
 	payload := make([]byte, 2*uint32Size+len(block))
 	binary.BigEndian.PutUint32(payload[:uint32Size], pieceIndex)
 	binary.BigEndian.PutUint32(payload[uint32Size:2*uint32Size], begin)
@@ -157,7 +303,16 @@ func newPiece(pieceIndex uint32, begin uint32, block []byte) Message {
 	return Message{
 		ID:      MessagePiece,
 		Payload: payload,
+	}, nil
+}
+
+func WritePiece(w io.Writer, pieceIndex uint32, begin uint32, block []byte) (int64, error) {
+	piece, err := NewPiece(pieceIndex, begin, block)
+	if err != nil {
+		return 0, err
 	}
+
+	return piece.WriteTo(w)
 }
 
 func ParsePiece(message Message) (pieceIndex uint32, begin uint32, block []byte, err error) {

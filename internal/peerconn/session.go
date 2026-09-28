@@ -64,15 +64,9 @@ func (s *Session) Read() (peerwire.Message, error) {
 
 		switch message.ID {
 		case peerwire.MessageChoke:
-			if len(message.Payload) != 0 {
-				return peerwire.Message{}, errors.New("choke message has payload")
-			}
 			s.choked = true
 
 		case peerwire.MessageUnchoke:
-			if len(message.Payload) != 0 {
-				return peerwire.Message{}, errors.New("unchoke message has payload")
-			}
 			s.choked = false
 
 		case peerwire.MessageBitfield:

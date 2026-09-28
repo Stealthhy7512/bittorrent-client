@@ -16,4 +16,5 @@ nvim.log
 .DS_Store
 
 *.md
+!/README.md
 docs/

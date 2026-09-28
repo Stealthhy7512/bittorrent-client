@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -291,4 +292,182 @@ func requireMessageFrame(t *testing.T, frame Frame) Message {
 		t.Fatal("Message() ok = false, want true")
 	}
 	return message
+}
+
+func TestReadFrameRejectsInvalidLengthBeforeReadingPayload(t *testing.T) {
+	tests := []struct {
+		id     MessageID
+		length uint32
+	}{
+		{MessageChoke, 2},
+		{MessageUnchoke, 2},
+		{MessageInterested, 2},
+		{MessageNotInterested, 2},
+		{MessageHave, 4},
+		{MessageHave, 6},
+		{MessageRequest, 12},
+		{MessageRequest, 14},
+		{MessageCancel, 12},
+		{MessageCancel, 14},
+		{MessagePiece, 8},
+		{MessagePiece, 9 + MaxBlockSize + 1},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("ID %d length %d", test.id, test.length), func(t *testing.T) {
+			input := []byte{0, 0, 0, 0, byte(test.id), 0xaa}
+			binary.BigEndian.PutUint32(input[:4], test.length)
+			r := bytes.NewReader(input)
+			if _, err := ReadFrame(r); err == nil {
+				t.Fatal("ReadFrame() error = nil, want invalid-length error")
+			}
+			if r.Len() != 1 {
+				t.Fatalf("unread bytes = %d, want payload byte left unread", r.Len())
+			}
+		})
+	}
+}
+
+func TestReadFrameAcceptsCoreMessageLengths(t *testing.T) {
+	tests := []struct {
+		id      MessageID
+		payload []byte
+	}{
+		{MessageChoke, nil},
+		{MessageUnchoke, nil},
+		{MessageInterested, nil},
+		{MessageNotInterested, nil},
+		{MessageHave, []byte{0, 0, 0, 1}},
+		{MessageRequest, []byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3}},
+		{MessageCancel, []byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3}},
+		{MessagePiece, append(make([]byte, 8), bytes.Repeat([]byte{0xab}, MaxBlockSize)...)},
+	}
+	for _, test := range tests {
+		t.Run(fmt.Sprintf("ID %d", test.id), func(t *testing.T) {
+			input := make([]byte, 5)
+			binary.BigEndian.PutUint32(input[:4], uint32(1+len(test.payload)))
+			input[4] = byte(test.id)
+			input = append(input, test.payload...)
+			frame, err := ReadFrame(bytes.NewReader(input))
+			if err != nil {
+				t.Fatalf("ReadFrame() error = %v", err)
+			}
+			got := requireMessageFrame(t, frame)
+			if got.ID != test.id || !bytes.Equal(got.Payload, test.payload) {
+				t.Fatalf("ReadFrame() ID = %d, payload length = %d; want ID %d and matching payload", got.ID, len(got.Payload), test.id)
+			}
+		})
+	}
+}
+
+func TestSemanticWritersEncodeFrames(t *testing.T) {
+	bitfield, err := NewBitfield(9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, index := range []int{0, 8} {
+		if err := bitfield.SetPiece(index); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name  string
+		write func(io.Writer) (int64, error)
+		want  []byte
+	}{
+		{"keep-alive", WriteKeepAlive, []byte{0, 0, 0, 0}},
+		{"choke", WriteChoke, []byte{0, 0, 0, 1, 0}},
+		{"unchoke", WriteUnchoke, []byte{0, 0, 0, 1, 1}},
+		{"interested", WriteInterested, []byte{0, 0, 0, 1, 2}},
+		{"not interested", WriteNotInterested, []byte{0, 0, 0, 1, 3}},
+		{"have", func(w io.Writer) (int64, error) { return WriteHave(w, 258) }, []byte{0, 0, 0, 5, 4, 0, 0, 1, 2}},
+		{"bitfield", func(w io.Writer) (int64, error) { return WriteBitfield(w, bitfield) }, []byte{0, 0, 0, 3, 5, 0x80, 0x80}},
+		{"request", func(w io.Writer) (int64, error) { return WriteRequest(w, 258, 16384, 7) }, []byte{0, 0, 0, 13, 6, 0, 0, 1, 2, 0, 0, 0x40, 0, 0, 0, 0, 7}},
+		{"piece", func(w io.Writer) (int64, error) { return WritePiece(w, 258, 16384, []byte{0xab, 0xcd}) }, []byte{0, 0, 0, 11, 7, 0, 0, 1, 2, 0, 0, 0x40, 0, 0xab, 0xcd}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := &shortWriter{limit: 2}
+			n, err := test.write(w)
+			if err != nil || n != int64(len(test.want)) || !bytes.Equal(w.Bytes(), test.want) {
+				t.Fatalf("write() = (%d, %v), bytes %v; want %d, nil, %v", n, err, w.Bytes(), len(test.want), test.want)
+			}
+		})
+	}
+}
+
+func TestRequestLengthBounds(t *testing.T) {
+	for _, length := range []uint32{0, 1, MaxBlockSize, MaxBlockSize + 1} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			valid := length > 0 && length <= MaxBlockSize
+			// Build incoming bytes independently of NewRequest.
+			payload := []byte{0, 0, 1, 2, 0, 0, 0x40, 0, 0, 0, 0, 0}
+			binary.BigEndian.PutUint32(payload[8:], length)
+			index, begin, gotLength, err := ParseRequest(Message{ID: MessageRequest, Payload: payload})
+			if (err == nil) != valid {
+				t.Fatalf("ParseRequest() error = %v, valid = %t", err, valid)
+			}
+			if valid && (index != 258 || begin != 16384 || gotLength != length) {
+				t.Fatalf("ParseRequest() = (%d, %d, %d), want (258, 16384, %d)", index, begin, gotLength, length)
+			}
+			message, err := NewRequest(258, 16384, length)
+			if (err == nil) != valid {
+				t.Fatalf("NewRequest() error = %v, valid = %t", err, valid)
+			}
+			if valid && (message.ID != MessageRequest || !bytes.Equal(message.Payload, payload)) {
+				t.Fatalf("NewRequest() = %#v, want Request with payload %v", message, payload)
+			}
+		})
+	}
+}
+
+func TestParseRequestRejectsInvalidMessage(t *testing.T) {
+	tests := []struct {
+		name    string
+		message Message
+	}{
+		{"wrong ID", Message{ID: MessageCancel, Payload: []byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3}}},
+		{"empty", Message{ID: MessageRequest}},
+		{"short", Message{ID: MessageRequest, Payload: make([]byte, 11)}},
+		{"long", Message{ID: MessageRequest, Payload: []byte{0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, _, err := ParseRequest(test.message); err == nil {
+				t.Fatal("ParseRequest() error = nil, want invalid-message error")
+			}
+		})
+	}
+}
+
+func TestNewPieceCopiesMaximumBlock(t *testing.T) {
+	block := bytes.Repeat([]byte{0xab}, MaxBlockSize)
+	message, err := NewPiece(258, 16384, block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block[0] = 0
+	want := append([]byte{0, 0, 1, 2, 0, 0, 0x40, 0}, bytes.Repeat([]byte{0xab}, MaxBlockSize)...)
+	if message.ID != MessagePiece || !bytes.Equal(message.Payload, want) {
+		t.Fatal("NewPiece() did not preserve the encoded header and independent block copy")
+	}
+}
+
+func TestInvalidMessageWritersDoNotWrite(t *testing.T) {
+	tests := []struct {
+		name  string
+		write func(io.Writer) (int64, error)
+	}{
+		{"empty request", func(w io.Writer) (int64, error) { return WriteRequest(w, 0, 0, 0) }},
+		{"oversized request", func(w io.Writer) (int64, error) { return WriteRequest(w, 0, 0, MaxBlockSize+1) }},
+		{"oversized piece", func(w io.Writer) (int64, error) { return WritePiece(w, 0, 0, make([]byte, MaxBlockSize+1)) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := &recordingErrorWriter{err: errors.New("unexpected write")}
+			n, err := test.write(w)
+			if err == nil || n != 0 || w.calls != 0 {
+				t.Fatalf("write() = (%d, %v), writer calls = %d; want zero bytes, validation error, no calls", n, err, w.calls)
+			}
+		})
+	}
 }

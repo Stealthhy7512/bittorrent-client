@@ -2,6 +2,8 @@ package peerconn
 
 import (
 	"encoding/binary"
+	"errors"
+	"io"
 	"net"
 	"testing"
 
@@ -186,6 +188,16 @@ func TestSessionReadRejectsMalformedStateMessages(t *testing.T) {
 			message:    peerwire.Message{ID: peerwire.MessageUnchoke, Payload: []byte{1}},
 		},
 		{
+			name:       "interested with payload",
+			pieceCount: 1,
+			message:    peerwire.Message{ID: peerwire.MessageInterested, Payload: []byte{1}},
+		},
+		{
+			name:       "not interested with payload",
+			pieceCount: 1,
+			message:    peerwire.Message{ID: peerwire.MessageNotInterested, Payload: []byte{1}},
+		},
+		{
 			name:       "bitfield with wrong length",
 			pieceCount: 9,
 			message:    peerwire.Message{ID: peerwire.MessageBitfield, Payload: []byte{0}},
@@ -207,13 +219,7 @@ func TestSessionReadRejectsMalformedStateMessages(t *testing.T) {
 			session, peer := newTestSession(t, test.pieceCount)
 			defer peer.Close()
 
-			writeDone := writePeerMessage(peer, test.message)
-			if _, err := session.Read(); err == nil {
-				t.Fatal("Read() error = nil, want malformed-message error")
-			}
-			if err := <-writeDone; err != nil {
-				t.Fatalf("write message: %v", err)
-			}
+			assertReadRejectsMessage(t, session, test.message, peer)
 		})
 	}
 }
@@ -260,7 +266,12 @@ func assertReadRejectsMessage(
 	if _, err := session.Read(); err == nil {
 		t.Fatal("Read() error = nil, want rejected-message error")
 	}
-	if err := <-writeDone; err != nil {
+	// A rejected header can leave its payload unread. Close the pipe before
+	// waiting for the writer, which may still be blocked sending that payload.
+	if err := peer.Close(); err != nil {
+		t.Fatalf("close rejected peer: %v", err)
+	}
+	if err := <-writeDone; err != nil && !errors.Is(err, io.ErrClosedPipe) {
 		t.Fatalf("write message: %v", err)
 	}
 }

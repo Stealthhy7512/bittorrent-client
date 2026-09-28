@@ -120,3 +120,71 @@ func TestExchangeHandshake(t *testing.T) {
 		t.Fatalf("server error = %v", err)
 	}
 }
+
+func TestDialFirstLeavesSelectedConnectionUsable(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+	addr, err := netip.ParseAddrPort(listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	infoHash := [20]byte{1}
+	remoteID := [20]byte{3}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	deadline, _ := ctx.Deadline()
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		if err := conn.SetDeadline(deadline); err != nil {
+			serverDone <- err
+			return
+		}
+		if _, err := peerwire.ReadHandshake(conn); err != nil {
+			serverDone <- err
+			return
+		}
+		if _, err := (peerwire.Handshake{InfoHash: infoHash, PeerID: remoteID}).WriteTo(conn); err != nil {
+			serverDone <- err
+			return
+		}
+		// This read can succeed only if DialFirst's deferred Pool.Close leaves
+		// the connection transferred to its caller open.
+		frame, err := peerwire.ReadFrame(conn)
+		if err == nil {
+			message, ok := frame.Message()
+			if !ok || message.ID != peerwire.MessageInterested {
+				err = errors.New("expected interested after handshake")
+			}
+		}
+		serverDone <- err
+	}()
+	result, err := DialFirst(ctx, []netip.AddrPort{addr}, infoHash, [20]byte{2}, DialOptions{
+		MaxConcurrent:  1,
+		AttemptTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer result.Conn.Close()
+	if result.Addr != addr || result.Handshake.PeerID != remoteID {
+		t.Fatalf("DialFirst() returned wrong endpoint or peer ID: %#v", result)
+	}
+	if err := result.Conn.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peerwire.WriteInterested(result.Conn); err != nil {
+		t.Fatalf("write to selected connection: %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("fake peer: %v", err)
+	}
+}

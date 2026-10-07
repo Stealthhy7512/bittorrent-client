@@ -39,6 +39,7 @@ type frameKind byte
 const (
 	frameKeepAlive frameKind = iota
 	frameMessage
+	frameUnsupported
 )
 
 type Frame struct {
@@ -60,13 +61,14 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 }
 
 // ReadFrame reads one frame, rejecting declarations above 1 MiB. It checks
-// fixed-size core message lengths and the Piece block limit before allocating
-// the payload. Bitfield contents and Request fields require separate parsing.
-// Unknown IDs are currently returned with their payload intact.
+// fixed-size core message lengths, the Bitfield length derived from pieceCount,
+// and the Piece block limit before allocating the payload. Unknown message
+// payloads are drained and returned as unsupported frames. Bitfield contents
+// and Request fields require separate parsing.
 //
 // A rejected declaration may leave its payload unread. The caller must treat
 // that error as terminal for the stream rather than attempt another frame read.
-func ReadFrame(r io.Reader) (Frame, error) {
+func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	var prefix [uint32Size]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
 		return Frame{}, fmt.Errorf("read msg length: %w", err)
@@ -114,7 +116,18 @@ func ReadFrame(r io.Reader) (Frame, error) {
 			)
 		}
 	case MessageBitfield:
-
+		expectedBytes := pieceCount / 8
+		if pieceCount%8 != 0 {
+			expectedBytes++
+		}
+		if length != uint32(expectedBytes+1) { // include MessageID
+			return Frame{}, fmt.Errorf(
+				"message %v: bitfield length is %v, want %v",
+				messageID,
+				length-1,
+				expectedBytes,
+			)
+		}
 	case MessageRequest:
 		if length != 13 {
 			return Frame{}, fmt.Errorf(
@@ -148,6 +161,15 @@ func ReadFrame(r io.Reader) (Frame, error) {
 				length,
 			)
 		}
+	// drain unsupported messages
+	default:
+		if _, err := io.CopyN(io.Discard, r, int64(length-1)); err != nil {
+			return Frame{}, fmt.Errorf(
+				"drain unsupported message: %w",
+				err,
+			)
+		}
+		return Frame{kind: frameUnsupported}, nil
 	}
 
 	payload := make([]byte, int(length-1)) // ID already read, decrement length
@@ -183,6 +205,10 @@ func WriteKeepAlive(w io.Writer) (int64, error) {
 
 func (f Frame) IsKeepAlive() bool {
 	return f.kind == frameKeepAlive
+}
+
+func (f Frame) IsUnsupported() bool {
+	return f.kind == frameUnsupported
 }
 
 func WriteChoke(w io.Writer) (int64, error) {
@@ -241,7 +267,7 @@ func ParseHave(message Message) (pieceIndex uint32, err error) {
 // NewRequest encodes a block request with a length from 1 through MaxBlockSize.
 // begin is a byte offset within the piece. Torrent-specific index and range
 // checks are left to the session.
-func NewRequest(pieceIndex uint32, begin uint32, length uint32) (Message, error) {
+func NewRequest(pieceIndex, begin, length uint32) (Message, error) {
 	if length == 0 {
 		return Message{}, errors.New("length cannot be zero")
 	}
@@ -262,7 +288,7 @@ func NewRequest(pieceIndex uint32, begin uint32, length uint32) (Message, error)
 
 // WriteRequest validates through NewRequest before writing any bytes, then
 // returns the framed byte count, including partial progress on a write error.
-func WriteRequest(w io.Writer, pieceIndex uint32, begin uint32, length uint32) (int64, error) {
+func WriteRequest(w io.Writer, pieceIndex, begin, length uint32) (int64, error) {
 	message, err := NewRequest(pieceIndex, begin, length)
 	if err != nil {
 		return 0, err
@@ -273,7 +299,7 @@ func WriteRequest(w io.Writer, pieceIndex uint32, begin uint32, length uint32) (
 // ParseRequest checks the Request ID, twelve-byte payload, and block-length
 // limits before returning its fields. The session checks the torrent-specific
 // piece index and byte range.
-func ParseRequest(message Message) (pieceIndex uint32, begin uint32, length uint32, err error) {
+func ParseRequest(message Message) (pieceIndex, begin, length uint32, err error) {
 	if message.ID != MessageRequest {
 		return 0, 0, 0, fmt.Errorf(
 			"parse request: message ID is %v, want %v",
@@ -312,7 +338,7 @@ func ParseRequest(message Message) (pieceIndex uint32, begin uint32, length uint
 // NewPiece encodes one block, copying its bytes so later changes to block do not
 // affect the message. It rejects blocks larger than MaxBlockSize; piece indexes,
 // offsets, and the expected response length are session-level checks.
-func NewPiece(pieceIndex uint32, begin uint32, block []byte) (Message, error) {
+func NewPiece(pieceIndex, begin uint32, block []byte) (Message, error) {
 	if len(block) > MaxBlockSize {
 		return Message{}, fmt.Errorf(
 			"new piece: block size %v, max allowed block size %v",
@@ -333,7 +359,7 @@ func NewPiece(pieceIndex uint32, begin uint32, block []byte) (Message, error) {
 }
 
 // WritePiece validates through NewPiece before writing the framed block response.
-func WritePiece(w io.Writer, pieceIndex uint32, begin uint32, block []byte) (int64, error) {
+func WritePiece(w io.Writer, pieceIndex, begin uint32, block []byte) (int64, error) {
 	piece, err := NewPiece(pieceIndex, begin, block)
 	if err != nil {
 		return 0, err
@@ -345,7 +371,7 @@ func WritePiece(w io.Writer, pieceIndex uint32, begin uint32, block []byte) (int
 // ParsePiece checks the Piece ID, eight-byte header, and maximum block size.
 // The returned block aliases message.Payload. Matching it to an outstanding
 // request, including its exact length, is the session's responsibility.
-func ParsePiece(message Message) (pieceIndex uint32, begin uint32, block []byte, err error) {
+func ParsePiece(message Message) (pieceIndex, begin uint32, block []byte, err error) {
 	if message.ID != MessagePiece {
 		return 0, 0, nil, fmt.Errorf(
 			"parse piece: message ID is %v, want %v",

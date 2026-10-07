@@ -1,3 +1,5 @@
+// Command bt inspects single-file BitTorrent metainfo, announces to an HTTP
+// tracker, or completes a handshake with a discovered peer.
 package main
 
 import (
@@ -40,6 +42,8 @@ func run(args []string) error {
 	}
 }
 
+// announce validates command arguments, sends a started announce with a fresh
+// peer ID, and prints the tracker interval and returned peer endpoints.
 func announce(args []string) error {
 	flags := flag.NewFlagSet("announce", flag.ContinueOnError)
 	port := flags.Uint("port", 6881, "listening port advertised to the tracker")
@@ -99,6 +103,8 @@ func announce(args []string) error {
 	return nil
 }
 
+// newPeerID combines the client/version prefix with cryptographically random
+// bytes. A caller should reuse this ID throughout one torrent participation.
 func newPeerID() ([20]byte, error) {
 	var peerID [20]byte
 	copy(peerID[:], "-BT0001-")
@@ -137,6 +143,9 @@ func inspect(args []string) error {
 	return nil
 }
 
+// handshake announces to discover endpoints, then prints the first peer to
+// complete a valid handshake. One overall timeout covers both the tracker
+// request and peer discovery; the selected connection is closed before return.
 func handshake(args []string) error {
 	flags := flag.NewFlagSet("handshake", flag.ContinueOnError)
 	port := flags.Uint("port", 6881, "listening port advertised to the tracker")

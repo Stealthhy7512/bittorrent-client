@@ -70,7 +70,7 @@ func TestWriteKeepAliveWritesZeroLengthPrefix(t *testing.T) {
 func TestReadFrameReadsInterested(t *testing.T) {
 	input := []byte{0, 0, 0, 1, 2}
 
-	got, err := ReadFrame(bytes.NewReader(input))
+	got, err := ReadFrame(bytes.NewReader(input), 0)
 	if err != nil {
 		t.Fatalf("ReadFrame() error = %v", err)
 	}
@@ -91,7 +91,7 @@ func TestReadFrameReadsPayload(t *testing.T) {
 	}
 	wantPayload := []byte{0, 0, 0, 5}
 
-	got, err := ReadFrame(bytes.NewReader(input))
+	got, err := ReadFrame(bytes.NewReader(input), 0)
 	if err != nil {
 		t.Fatalf("ReadFrame() error = %v", err)
 	}
@@ -105,7 +105,7 @@ func TestReadFrameReadsPayload(t *testing.T) {
 }
 
 func TestReadFrameRecognizesKeepAlive(t *testing.T) {
-	got, err := ReadFrame(bytes.NewReader([]byte{0, 0, 0, 0}))
+	got, err := ReadFrame(bytes.NewReader([]byte{0, 0, 0, 0}), 0)
 	if err != nil {
 		t.Fatalf("ReadFrame() error = %v", err)
 	}
@@ -118,7 +118,7 @@ func TestReadFrameRecognizesKeepAlive(t *testing.T) {
 }
 
 func TestReadFrameRejectsTruncatedLength(t *testing.T) {
-	_, err := ReadFrame(bytes.NewReader([]byte{0, 0}))
+	_, err := ReadFrame(bytes.NewReader([]byte{0, 0}), 0)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
 	}
@@ -127,7 +127,7 @@ func TestReadFrameRejectsTruncatedLength(t *testing.T) {
 func TestReadFrameRejectsTruncatedBody(t *testing.T) {
 	input := []byte{0, 0, 0, 5, 4, 0, 0}
 
-	_, err := ReadFrame(bytes.NewReader(input))
+	_, err := ReadFrame(bytes.NewReader(input), 0)
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("ReadFrame() error = %v, want io.ErrUnexpectedEOF", err)
 	}
@@ -140,7 +140,7 @@ func TestReadFrameConsumesOneFrame(t *testing.T) {
 	}
 	r := bytes.NewReader(input)
 
-	first, err := ReadFrame(r)
+	first, err := ReadFrame(r, 0)
 	if err != nil {
 		t.Fatalf("first ReadFrame() error = %v", err)
 	}
@@ -149,7 +149,7 @@ func TestReadFrameConsumesOneFrame(t *testing.T) {
 		t.Fatalf("first ReadFrame() = %#v, want interested message", first)
 	}
 
-	second, err := ReadFrame(r)
+	second, err := ReadFrame(r, 0)
 	if err != nil {
 		t.Fatalf("second ReadFrame() error = %v", err)
 	}
@@ -162,9 +162,70 @@ func TestReadFrameConsumesOneFrame(t *testing.T) {
 func TestReadFrameRejectsOversizedMessage(t *testing.T) {
 	input := []byte{0, 16, 0, 1} // 1 MiB + 1 byte.
 
-	_, err := ReadFrame(bytes.NewReader(input))
+	_, err := ReadFrame(bytes.NewReader(input), 0)
 	if err == nil || !strings.Contains(err.Error(), "exceeds max") {
 		t.Fatalf("ReadFrame() error = %v, want maximum-length error", err)
+	}
+}
+
+func TestReadFrameChecksBitfieldLengthBeforeReadingPayload(t *testing.T) {
+	for _, declaredLength := range []uint32{2, 4} {
+		t.Run(fmt.Sprintf("length %d", declaredLength), func(t *testing.T) {
+			input := make([]byte, 6)
+			binary.BigEndian.PutUint32(input[:4], declaredLength)
+			input[4] = byte(MessageBitfield)
+			input[5] = 0xaa
+			r := bytes.NewReader(input)
+
+			if _, err := ReadFrame(r, 9); err == nil {
+				t.Fatal("ReadFrame() error = nil, want bitfield-length error")
+			}
+			if r.Len() != 1 {
+				t.Fatalf("unread bytes = %d, want payload byte left unread", r.Len())
+			}
+		})
+	}
+
+	input := []byte{0, 0, 0, 3, byte(MessageBitfield), 0x80, 0x80}
+	frame, err := ReadFrame(bytes.NewReader(input), 9)
+	if err != nil {
+		t.Fatalf("ReadFrame() error = %v", err)
+	}
+	message := requireMessageFrame(t, frame)
+	if message.ID != MessageBitfield || !bytes.Equal(message.Payload, []byte{0x80, 0x80}) {
+		t.Fatalf("ReadFrame() message = %#v, want two-byte bitfield", message)
+	}
+}
+
+func TestReadFrameDrainsUnsupportedMessage(t *testing.T) {
+	r := bytes.NewReader([]byte{
+		0, 0, 0, 4, 20, 0xaa, 0xbb, 0xcc,
+		0, 0, 0, 1, byte(MessageChoke),
+	})
+	frame, err := ReadFrame(r, 0)
+	if err != nil {
+		t.Fatalf("ReadFrame() error = %v", err)
+	}
+	if !frame.IsUnsupported() {
+		t.Fatalf("ReadFrame() = %#v, want unsupported frame", frame)
+	}
+	if _, ok := frame.Message(); ok {
+		t.Fatal("Message() ok = true for unsupported frame, want false")
+	}
+
+	frame, err = ReadFrame(r, 0)
+	if err != nil {
+		t.Fatalf("next ReadFrame() error = %v", err)
+	}
+	if message := requireMessageFrame(t, frame); message.ID != MessageChoke {
+		t.Fatalf("next message ID = %d, want Choke", message.ID)
+	}
+}
+
+func TestReadFrameRejectsTruncatedUnsupportedMessage(t *testing.T) {
+	input := []byte{0, 0, 0, 4, 20, 0xaa}
+	if _, err := ReadFrame(bytes.NewReader(input), 0); !errors.Is(err, io.EOF) {
+		t.Fatalf("ReadFrame() error = %v, want io.EOF", err)
 	}
 }
 
@@ -317,7 +378,7 @@ func TestReadFrameRejectsInvalidLengthBeforeReadingPayload(t *testing.T) {
 			input := []byte{0, 0, 0, 0, byte(test.id), 0xaa}
 			binary.BigEndian.PutUint32(input[:4], test.length)
 			r := bytes.NewReader(input)
-			if _, err := ReadFrame(r); err == nil {
+			if _, err := ReadFrame(r, 0); err == nil {
 				t.Fatal("ReadFrame() error = nil, want invalid-length error")
 			}
 			if r.Len() != 1 {
@@ -347,7 +408,7 @@ func TestReadFrameAcceptsCoreMessageLengths(t *testing.T) {
 			binary.BigEndian.PutUint32(input[:4], uint32(1+len(test.payload)))
 			input[4] = byte(test.id)
 			input = append(input, test.payload...)
-			frame, err := ReadFrame(bytes.NewReader(input))
+			frame, err := ReadFrame(bytes.NewReader(input), 0)
 			if err != nil {
 				t.Fatalf("ReadFrame() error = %v", err)
 			}

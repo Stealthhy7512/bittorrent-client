@@ -158,7 +158,7 @@ func TestDialFirstLeavesSelectedConnectionUsable(t *testing.T) {
 		}
 		// This read can succeed only if DialFirst's deferred Pool.Close leaves
 		// the connection transferred to its caller open.
-		frame, err := peerwire.ReadFrame(conn)
+		frame, err := peerwire.ReadFrame(conn, 0)
 		if err == nil {
 			message, ok := frame.Message()
 			if !ok || message.ID != peerwire.MessageInterested {

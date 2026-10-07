@@ -12,12 +12,12 @@ import (
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
 )
 
+// might be changed later on
 const (
 	maxConcurrentDials   = 4
 	maxWaitingCandidates = 4
 )
 
-// ErrNoMoreCandidates reports that every unique endpoint has been attempted.
 var ErrNoMoreCandidates = errors.New("no more peer candidates")
 
 // Pool discovers handshaked peer candidates while bounding open connections.
@@ -44,7 +44,11 @@ type dialResult struct {
 	err error
 }
 
-// NewPool starts candidate discovery. The caller must close the returned pool.
+// NewPool starts candidate discovery over deduplicated endpoints, with at most
+// four concurrent attempts.
+//
+// A shared four-slot budget covers both attempts and unclaimed successful connections.
+// Each attempt has its own timeout, capped by ctx. The caller must close the returned pool.
 func NewPool(
 	ctx context.Context,
 	addrs []netip.AddrPort,
@@ -55,6 +59,10 @@ func NewPool(
 	return newPoolWithDial(ctx, addrs, infoHash, peerID, options, dial)
 }
 
+// newPoolWithDial wires the job feeder, dial workers, and result collector.
+//
+// It's wrapped around exported NewPool because it is the test seam for deterministic
+// connection outcomes.
 func newPoolWithDial(
 	ctx context.Context,
 	addrs []netip.AddrPort,
@@ -99,7 +107,10 @@ func newPoolWithDial(
 }
 
 // Next returns the next successfully handshaked candidate in completion order.
-// Ownership of the candidate connection transfers to the caller.
+// It blocks until a candidate is available or discovery ends. Ownership of the
+// candidate connection transfers to the caller, releasing its pool slot.
+// Exhaustion joins ErrNoMoreCandidates with recorded attempt errors; cancellation
+// returns the pool context's error instead.
 func (p *Pool) Next() (DialResult, error) {
 	if err := p.ctx.Err(); err != nil {
 		return DialResult{}, err
@@ -122,7 +133,9 @@ func (p *Pool) Next() (DialResult, error) {
 }
 
 // Close stops discovery, closes unclaimed connections, and waits for workers.
-// It is safe to call Close more than once.
+// Connections already returned by Next remain the caller's responsibility.
+//
+// It is idempotent.
 func (p *Pool) Close() {
 	p.closeOnce.Do(func() {
 		p.cancel()
@@ -167,14 +180,14 @@ func validatePoolArguments(
 	return ctx.Err()
 }
 
-// uniqueEndpoints builds a set of endpoints and returns a slice of its elements.
+// uniqueEndpoints preserves first-seen order while deduplicating endpoints.
 func uniqueEndpoints(addrs []netip.AddrPort) []netip.AddrPort {
 	// `map[T]struct{}` instead of `map[T]bool` because empty struct consumes no memory
 	seen := make(map[netip.AddrPort]struct{}, len(addrs))
 	unique := make([]netip.AddrPort, 0, len(addrs))
 
 	for _, addr := range addrs {
-		addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port())
+		addr = netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()) // normalize IPv6 addresses to IPv4
 		if _, exists := seen[addr]; exists {
 			continue
 		}
@@ -184,6 +197,8 @@ func uniqueEndpoints(addrs []netip.AddrPort) []netip.AddrPort {
 	return unique
 }
 
+// feedJobs offers each unique endpoint once and closes jobs on completion or
+// cancellation. The unbuffered channel keeps dispatch tied to worker readiness.
 func (p *Pool) feedJobs(jobs chan<- netip.AddrPort, addrs []netip.AddrPort) {
 	defer close(jobs)
 	for _, addr := range addrs {
@@ -195,6 +210,10 @@ func (p *Pool) feedJobs(jobs chan<- netip.AddrPort, addrs []netip.AddrPort) {
 	}
 }
 
+// runWorker reserves a slot before each dial and handshake attempt. Failures
+// release it immediately; successes retain it until claimed by Next or closed
+// during cleanup. A result that cannot be delivered on cancellation is cleaned
+// up by the worker itself.
 func (p *Pool) runWorker(
 	jobs <-chan netip.AddrPort,
 	results chan<- dialResult,
@@ -243,6 +262,10 @@ func (p *Pool) runWorker(
 	}
 }
 
+// collect queues successful candidates and records non-cancellation failures.
+// After cancellation it continues draining worker results, closing connections
+// that it does not queue. exhaustErr is finalized before candidates and done
+// close, so exhaustion readers and Close observe completed collection.
 func (p *Pool) collect(results <-chan dialResult) {
 	defer close(p.done)
 	defer close(p.candidates)
@@ -269,7 +292,8 @@ func (p *Pool) collect(results <-chan dialResult) {
 	p.exhaustErr = errors.Join(failures...)
 }
 
-// acquireSlot sends an empty struct into slots chan to occupy.
+// acquireSlot waits for capacity shared by attempts and unclaimed connections.
+// Cancellation lets a worker stop even while every slot is occupied.
 func (p *Pool) acquireSlot() bool {
 	select {
 	case p.slots <- struct{}{}:

@@ -27,6 +27,9 @@ type DialResult struct {
 	Handshake peerwire.Handshake
 }
 
+// DialFirst returns the first successfully handshaked candidate from a Pool.
+// Before returning it stops discovery and closes unclaimed connections. The
+// caller owns the returned connection and must close it.
 func DialFirst(
 	ctx context.Context,
 	addrs []netip.AddrPort,
@@ -42,6 +45,9 @@ func DialFirst(
 	return pool.Next()
 }
 
+// dial opens TCP and exchanges a handshake under ctx, closing the connection on
+// failure. On success it stops watching ctx and clears the attempt deadline so
+// the next owner can establish its own I/O lifetime.
 func dial(
 	ctx context.Context,
 	addr netip.AddrPort,
@@ -78,6 +84,11 @@ func dial(
 	return conn, remote, nil
 }
 
+// watchContext applies ctx's deadline and interrupts pending I/O on cancellation,
+// including when ctx has no deadline, by setting an immediate connection deadline.
+// The returned function must be called exactly once: it waits for the watcher
+// to exit before clearing deadlines, preventing a late cancellation from
+// affecting the next owner. It does not restore any previous deadline.
 func watchContext(ctx context.Context, conn net.Conn) (func(), error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := conn.SetDeadline(deadline); err != nil {
@@ -103,6 +114,9 @@ func watchContext(ctx context.Context, conn net.Conn) (func(), error) {
 	}, nil
 }
 
+// exchangeHandshake sends the local handshake and requires the response to name
+// the same info hash. It preserves the remote peer ID and reserved bits without
+// interpreting them. The caller controls cancellation and connection deadlines.
 func exchangeHandshake(
 	conn io.ReadWriter,
 	infoHash [20]byte,

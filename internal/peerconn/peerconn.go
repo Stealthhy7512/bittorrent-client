@@ -1,2 +1,3 @@
-// Package peerconn implements peer connections and peer-to-peer sessions.
+// Package peerconn manages TCP connections, handshakes, and stateful sessions
+// with BitTorrent peers.
 package peerconn

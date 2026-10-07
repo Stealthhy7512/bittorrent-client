@@ -1,11 +1,15 @@
 package peerconn
 
 import (
+	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
 )
@@ -148,6 +152,32 @@ func TestSessionReadAllowsKeepAliveBeforeBitfield(t *testing.T) {
 	}
 }
 
+func TestSessionReadAllowsUnsupportedMessageBeforeBitfield(t *testing.T) {
+	session, peer := newTestSession(t, 1)
+	defer peer.Close()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		if _, err := (peerwire.Message{ID: 20, Payload: []byte{1, 2, 3}}).WriteTo(peer); err != nil {
+			writeDone <- err
+			return
+		}
+		_, err := (peerwire.Message{ID: peerwire.MessageBitfield, Payload: []byte{0x80}}).WriteTo(peer)
+		writeDone <- err
+	}()
+
+	message, err := session.Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write frames: %v", err)
+	}
+	if message.ID != peerwire.MessageBitfield || !session.HasPiece(0) {
+		t.Fatalf("Read() message ID = %d, HasPiece(0) = %t; want Bitfield advertising piece 0", message.ID, session.HasPiece(0))
+	}
+}
+
 func TestSessionReadRejectsRepeatedBitfield(t *testing.T) {
 	session, peer := newTestSession(t, 1)
 	defer peer.Close()
@@ -221,6 +251,186 @@ func TestSessionReadRejectsMalformedStateMessages(t *testing.T) {
 
 			assertReadRejectsMessage(t, session, test.message, peer)
 		})
+	}
+}
+
+func TestSessionFetchesOneBlockFromPeer(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	if err := client.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewSession(client, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	peerDone := make(chan error, 1)
+	go func() {
+		peerDone <- func() error {
+			if _, err := (peerwire.Message{
+				ID:      peerwire.MessageBitfield,
+				Payload: []byte{0x80},
+			}).WriteTo(peer); err != nil {
+				return fmt.Errorf("advertise Piece: %w", err)
+			}
+
+			frame, err := peerwire.ReadFrame(peer, 1)
+			if err != nil {
+				return fmt.Errorf("read Interested: %w", err)
+			}
+			message, ok := frame.Message()
+			if !ok || message.ID != peerwire.MessageInterested {
+				return fmt.Errorf("received %#v, want Interested", frame)
+			}
+
+			if _, err := peerwire.WriteUnchoke(peer); err != nil {
+				return fmt.Errorf("send Unchoke: %w", err)
+			}
+			frame, err = peerwire.ReadFrame(peer, 1)
+			if err != nil {
+				return fmt.Errorf("read Request: %w", err)
+			}
+			message, ok = frame.Message()
+			if !ok {
+				return fmt.Errorf("received %#v, want Request", frame)
+			}
+			index, offset, length, err := peerwire.ParseRequest(message)
+			if err != nil {
+				return fmt.Errorf("parse Request: %w", err)
+			}
+			if index != 0 || offset != 0 || length != 4 {
+				return fmt.Errorf("Request = (%d, %d, %d), want (0, 0, 4)", index, offset, length)
+			}
+			if _, err := peerwire.WritePiece(peer, 0, 0, []byte("data")); err != nil {
+				return fmt.Errorf("send Block: %w", err)
+			}
+			return nil
+		}()
+	}()
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	var received []byte
+	var receivedOffset uint32
+	var blockCount int
+	err = session.FetchPiece(ctx, PieceSpec{Index: 0, Length: 4}, func(offset uint32, block []byte) error {
+		blockCount++
+		receivedOffset = offset
+		received = append([]byte(nil), block...)
+		return nil
+	})
+	_ = client.Close() // Unblock the fake Peer if FetchPiece returned early.
+	peerErr := <-peerDone
+	if err != nil {
+		t.Fatalf("FetchPiece() error = %v (fake Peer: %v)", err, peerErr)
+	}
+	if peerErr != nil {
+		t.Fatalf("fake Peer: %v", peerErr)
+	}
+	if blockCount != 1 || receivedOffset != 0 || !bytes.Equal(received, []byte("data")) {
+		t.Fatalf("accepted Blocks = %d, offset = %d, bytes = %q; want one Block at offset 0 with data", blockCount, receivedOffset, received)
+	}
+}
+
+func TestSessionFetchPieceRejectsWrongBlock(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	if err := peer.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewSession(client, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerDone := make(chan error, 1)
+	go func() {
+		if _, err := (peerwire.Message{ID: peerwire.MessageBitfield, Payload: []byte{0x80}}).WriteTo(peer); err != nil {
+			peerDone <- err
+			return
+		}
+		if _, err := peerwire.ReadFrame(peer, 2); err != nil { // Interested
+			peerDone <- err
+			return
+		}
+		if _, err := peerwire.WriteUnchoke(peer); err != nil {
+			peerDone <- err
+			return
+		}
+		if _, err := peerwire.ReadFrame(peer, 2); err != nil { // Request
+			peerDone <- err
+			return
+		}
+		_, err := peerwire.WritePiece(peer, 1, 0, []byte("data"))
+		peerDone <- err
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	called := false
+	err = session.FetchPiece(ctx, PieceSpec{Index: 0, Length: 4}, func(uint32, []byte) error {
+		called = true
+		return nil
+	})
+	_ = client.Close()
+	if peerErr := <-peerDone; peerErr != nil {
+		t.Fatalf("fake Peer: %v", peerErr)
+	}
+	if !errors.Is(err, ErrPeerProtocol) || called {
+		t.Fatalf("FetchPiece() error = %v, callback called = %t; want protocol error without callback", err, called)
+	}
+}
+
+func TestSessionFetchPieceCancellationInterruptsRead(t *testing.T) {
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+	if err := peer.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewSession(client, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- session.FetchPiece(ctx, PieceSpec{Index: 0, Length: 4}, func(uint32, []byte) error {
+			return nil
+		})
+	}()
+
+	if _, err := (peerwire.Message{ID: peerwire.MessageBitfield, Payload: []byte{0x80}}).WriteTo(peer); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := peerwire.ReadFrame(peer, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := frame.Message()
+	if !ok || message.ID != peerwire.MessageInterested {
+		t.Fatalf("received %#v, want Interested", frame)
+	}
+
+	cancel() // FetchPiece is now blocked waiting for Unchoke, with no context deadline.
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("FetchPiece() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("FetchPiece did not return after context cancellation")
 	}
 }
 

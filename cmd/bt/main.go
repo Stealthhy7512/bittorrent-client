@@ -1,5 +1,5 @@
 // Command bt inspects single-file BitTorrent metainfo, announces to an HTTP
-// tracker, or completes a handshake with a discovered peer.
+// tracker, handshakes with a discovered peer, or downloads one verified piece.
 package main
 
 import (
@@ -160,25 +160,20 @@ func handshake(args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-
 	if flags.NArg() != 1 {
 		flags.Usage()
 		return errors.New("handshake requires exactly one .torrent file")
 	}
-
 	if *port == 0 || *port > 65535 {
 		return errors.New("port must be between 1 and 65535")
 	}
-
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
-
 	torrent, err := metainfo.Open(flags.Arg(0))
 	if err != nil {
 		return err
 	}
-
 	if torrent.Length < 0 {
 		return errors.New("torrent has a negative length")
 	}
@@ -200,7 +195,6 @@ func handshake(args []string) error {
 		Compact:  true,
 		Event:    tracker.EventStarted,
 	})
-
 	if err != nil {
 		return err
 	}
@@ -223,6 +217,8 @@ func handshake(args []string) error {
 	return nil
 }
 
+// downloadPiece retrieves a single-block piece from one peer and publishes it
+// only after its SHA-1 digest matches metainfo. It does not retry another peer.
 func downloadPiece(args []string) error {
 	flags := flag.NewFlagSet("download-piece", flag.ContinueOnError)
 	port := flags.Uint("port", 6881, "listening port advertised to the tracker")
@@ -277,7 +273,7 @@ func downloadPiece(args []string) error {
 		return err
 	}
 
-	// piece length calculation as final piece might be shorter
+	// the final piece may be shorter than the declared piece length
 	start := int64(*piece) * torrent.PieceLength
 	length := min(torrent.PieceLength, torrent.Length-start)
 	if length <= 0 || uint64(length) > 1<<32 {
@@ -288,7 +284,7 @@ func downloadPiece(args []string) error {
 		return fmt.Errorf("piece size %v exceeds allowed maximum: %v", length, peerwire.MaxBlockSize)
 	}
 
-	// output file preflight
+	// reject an existing destination before announcing to the tracker
 	destination, err := os.Lstat(*output)
 	switch {
 	case err == nil:
@@ -310,7 +306,7 @@ func downloadPiece(args []string) error {
 			return fmt.Errorf("stat output path: %w", err)
 		}
 	case errors.Is(err, os.ErrNotExist):
-		// The temporary-file creation below checks that the parent is writable.
+		// temporary file creation below checks that the parent is writable
 	default:
 		return fmt.Errorf("stat output path: %w", err)
 	}
@@ -376,7 +372,7 @@ func downloadPiece(args []string) error {
 		return fmt.Errorf("error when fetching piece: %w", err)
 	}
 
-	// compare file digest and metadata hash
+	// hash the exact piece bytes written to the temporary file
 	if _, err := temp.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("seek temporary file: %w", err)
 	}
@@ -390,7 +386,7 @@ func downloadPiece(args []string) error {
 		return ErrHashMismatch
 	}
 
-	// temporary file cleanup
+	// close the verified temporary file before publishing it
 	if err := temp.Close(); err != nil {
 		return fmt.Errorf("close temporary file: %w", err)
 	}

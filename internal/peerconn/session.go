@@ -28,9 +28,11 @@ type PieceSpec struct {
 }
 
 var (
-	// ErrPieceUnavailable means the peer did not advertise the requested piece.
+	// ErrPieceUnavailable means the peer's Bitfield excludes the requested piece
+	// for this transfer attempt. The peer may announce it later with Have.
 	ErrPieceUnavailable = errors.New("peer does not have the requested piece")
-	// ErrPeerProtocol means the peer sent an invalid or unexpected block, bitfield ordering or indices.
+	// ErrPeerProtocol reports a well-formed message that violates session state
+	// or does not match the outstanding request.
 	ErrPeerProtocol = errors.New("peer protocol violation")
 	// ErrPeerChoked means this single-block transfer stopped after a choke.
 	ErrPeerChoked = errors.New("peer choked before completing the piece")
@@ -62,7 +64,8 @@ func NewSession(conn net.Conn, pieceCount int) (*Session, error) {
 // Unchoke, Bitfield, or Have updates. It validates advertised piece indexes and
 // accepts a Bitfield only before any other non-keep-alive supported message.
 //
-// Other message IDs are currently returned without session-level processing.
+// Other supported message IDs are returned without session-level processing;
+// bounded unsupported IDs are skipped.
 // A read or protocol error ends the usable session: the caller should close the
 // connection, since an invalid frame can leave unread bytes in the stream.
 func (s *Session) Read() (peerwire.Message, error) {
@@ -94,7 +97,7 @@ func (s *Session) Read() (peerwire.Message, error) {
 			}
 		}
 
-		// any non keep-alive message closes the bitfield window
+		// any supported non-keep-alive message closes the Bitfield window
 		s.bitfieldAllowed = false
 
 		switch message.ID {
@@ -132,9 +135,10 @@ func (s *Session) Read() (peerwire.Message, error) {
 	}
 }
 
-// FetchPiece obtains a single-block piece from this peer. It calls onBlock
-// synchronously after validating the response; the caller verifies the piece
-// hash. Multi-block pipelining and mid-transfer choke recovery are added later.
+// FetchPiece obtains a single-block piece from this peer. It waits for a Have
+// or Bitfield advertising the piece; a Bitfield that excludes it ends this
+// attempt. It calls onBlock synchronously after validating the response; the
+// caller verifies the piece hash.
 func (s *Session) FetchPiece(
 	ctx context.Context,
 	piece PieceSpec,
@@ -195,7 +199,7 @@ func (s *Session) FetchPiece(
 		return err
 	}
 
-	// check if piece is read before
+	// wait for the peer to advertise the requested piece
 	for !s.HasPiece(pieceIndex) {
 		message, err := read()
 
@@ -203,7 +207,7 @@ func (s *Session) FetchPiece(
 			return fmt.Errorf("read piece advertisement: %w", err)
 		}
 
-		// keep waiting for bitfield for whether requested piece is available
+		// a Bitfield reports the peer's complete availability at this moment
 		switch message.ID {
 		case peerwire.MessageBitfield:
 			if !s.HasPiece(pieceIndex) {
@@ -255,13 +259,13 @@ func (s *Session) FetchPiece(
 				return ctxErr
 			}
 
-			// finally handle request response
+			// deliver the validated block to the caller
 			if err := onBlock(0, block); err != nil {
 				return fmt.Errorf("accept block: %w", err)
 			}
 			return nil
 		default:
-			// TODO: check other messages
+			// other messages do not complete the outstanding request
 		}
 	}
 }

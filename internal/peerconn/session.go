@@ -30,7 +30,7 @@ type PieceSpec struct {
 var (
 	// ErrPieceUnavailable means the peer did not advertise the requested piece.
 	ErrPieceUnavailable = errors.New("peer does not have the requested piece")
-	// ErrPeerProtocol means the peer sent an invalid or unexpected block.
+	// ErrPeerProtocol means the peer sent an invalid or unexpected block, bitfield ordering or indices.
 	ErrPeerProtocol = errors.New("peer protocol violation")
 	// ErrPeerChoked means this single-block transfer stopped after a choke.
 	ErrPeerChoked = errors.New("peer choked before completing the piece")
@@ -87,8 +87,9 @@ func (s *Session) Read() (peerwire.Message, error) {
 
 		if message.ID == peerwire.MessageBitfield {
 			if !s.bitfieldAllowed {
-				return peerwire.Message{}, errors.New(
-					"bitfield must be the first peer message",
+				return peerwire.Message{}, fmt.Errorf(
+					"%w: bitfield must be the first peer message",
+					ErrPeerProtocol,
 				)
 			}
 		}
@@ -116,7 +117,12 @@ func (s *Session) Read() (peerwire.Message, error) {
 				return peerwire.Message{}, err
 			}
 			if uint64(index) >= uint64(s.pieceCount) {
-				return peerwire.Message{}, fmt.Errorf("have piece index %d is out of range %d", index, s.pieceCount)
+				return peerwire.Message{}, fmt.Errorf(
+					"%w: have piece index %d is out of range %d",
+					ErrPeerProtocol,
+					index,
+					s.pieceCount,
+				)
 			}
 			if err := s.peerPieces.SetPiece(int(index)); err != nil {
 				return peerwire.Message{}, fmt.Errorf("apply have: %w", err)
@@ -141,14 +147,22 @@ func (s *Session) FetchPiece(
 		return errors.New("block callback does not exist")
 	}
 	if uint64(piece.Index) >= uint64(s.pieceCount) {
-		return fmt.Errorf("piece index %d is out of range %d", piece.Index, s.pieceCount)
+		return fmt.Errorf(
+			"piece index %d is out of range %d",
+			piece.Index,
+			s.pieceCount,
+		)
 	}
 	pieceIndex := int(piece.Index)
 	if piece.Length == 0 {
 		return errors.New("piece length must be positive")
 	}
 	if piece.Length > peerwire.MaxBlockSize {
-		return fmt.Errorf("single-block piece length %d exceeds %d", piece.Length, peerwire.MaxBlockSize)
+		return fmt.Errorf(
+			"single-block piece length %d exceeds %d",
+			piece.Length,
+			peerwire.MaxBlockSize,
+		)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -224,7 +238,7 @@ func (s *Session) FetchPiece(
 		case peerwire.MessagePiece:
 			index, offset, block, err := peerwire.ParsePiece(message)
 			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPeerProtocol, err)
+				return fmt.Errorf("parse piece: %w", err)
 			}
 			if index != piece.Index || offset != 0 || uint64(len(block)) != piece.Length {
 				return fmt.Errorf("%w: block (%d, %d, %d), want (%d, 0, %d)",

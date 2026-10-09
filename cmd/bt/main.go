@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/netip"
 	"os"
@@ -21,6 +22,11 @@ import (
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerconn"
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
 	"github.com/Stealthhy7512/bittorrent-client/internal/tracker"
+)
+
+var (
+	ErrHashMismatch = errors.New("downloaded piece corrupted")
+	ErrWriteBlock   = errors.New("failed to write block")
 )
 
 func main() {
@@ -290,7 +296,7 @@ func downloadPiece(args []string) error {
 			return fmt.Errorf("output path %q is a directory", *output)
 		}
 		if !*force {
-			return fmt.Errorf("output path %q already exists", *output)
+			return fs.ErrExist
 		}
 		inputInfo, err := os.Stat(flags.Arg(0))
 		if err != nil {
@@ -357,10 +363,10 @@ func downloadPiece(args []string) error {
 		func(offset uint32, block []byte) error {
 			n, err := temp.WriteAt(block, int64(offset))
 			if err != nil {
-				return fmt.Errorf("write block at %v: %w", offset, err)
+				return fmt.Errorf("%w at offset %v: %w", ErrWriteBlock, offset, err)
 			}
 			if n != len(block) {
-				return fmt.Errorf("write block at %v: %w", offset, io.ErrShortWrite)
+				return fmt.Errorf("%w at offset %v: %w", ErrWriteBlock, offset, io.ErrShortWrite)
 			}
 
 			return nil
@@ -381,7 +387,7 @@ func downloadPiece(args []string) error {
 	}
 
 	if !bytes.Equal(hasher.Sum(nil), torrent.PieceHashes[*piece][:]) {
-		return errors.New("downloaded piece corrupted")
+		return ErrHashMismatch
 	}
 
 	// temporary file cleanup

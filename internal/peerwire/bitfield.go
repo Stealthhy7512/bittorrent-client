@@ -67,7 +67,8 @@ func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
 
 	if len(payload) != expectedPayloadSize {
 		return Bitfield{}, fmt.Errorf(
-			"bitfield length is %v, want %v",
+			"%w: bitfield length is %v, want %v",
+			ErrMalformedFrame,
 			len(payload),
 			expectedPayloadSize,
 		)
@@ -79,7 +80,7 @@ func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
 		spareMask := byte((1 << spareBits) - 1)
 
 		if payload[len(payload)-1]&spareMask != 0 {
-			return Bitfield{}, errors.New("bitfield has spare bits set")
+			return Bitfield{}, fmt.Errorf("%w: bitfield has spare bits set", ErrMalformedFrame)
 		}
 	}
 

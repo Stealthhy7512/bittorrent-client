@@ -91,7 +91,7 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	}
 
 	if length > maxMsgLen {
-		return Frame{}, fmt.Errorf("msg length %d exceeds max length %d", length, maxMsgLen)
+		return Frame{}, fmt.Errorf("%w: msg length %v exceeds max length %v", ErrMalformedFrame, length, maxMsgLen)
 
 	}
 
@@ -108,7 +108,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 		MessageInterested, MessageNotInterested:
 		if length != 1 {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want 1",
+				"%w: %v length %v, want 1",
+				ErrMalformedFrame,
 				messageID,
 				length,
 			)
@@ -116,7 +117,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	case MessageHave:
 		if length != 5 {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want 5",
+				"%w: %v length %v, want 5",
+				ErrMalformedFrame,
 				messageID,
 				length,
 			)
@@ -125,7 +127,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 		expectedBytes := bitfieldByteCount(pieceCount)
 		if uint64(length) != uint64(expectedBytes)+1 { // include MessageID
 			return Frame{}, fmt.Errorf(
-				"message %v: bitfield length is %v, want %v",
+				"%w: %v bitfield length is %v, want %v",
+				ErrMalformedFrame,
 				messageID,
 				length-1,
 				expectedBytes,
@@ -134,7 +137,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	case MessageRequest:
 		if length != 13 {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want 13",
+				"%w: %v length %v, want 13",
+				ErrMalformedFrame,
 				messageID,
 				length,
 			)
@@ -142,7 +146,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	case MessagePiece:
 		if length < 9 {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want at least 9",
+				"%w: %v length %v, want at least 9",
+				ErrMalformedFrame,
 				messageID,
 				length,
 			)
@@ -150,7 +155,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 
 		if length > 9+MaxBlockSize {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want at most 9+%v",
+				"%w: %v length %v, want at most 9+%v",
+				ErrMalformedFrame,
 				messageID,
 				length,
 				MaxBlockSize,
@@ -159,7 +165,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 	case MessageCancel:
 		if length != 13 {
 			return Frame{}, fmt.Errorf(
-				"message %v: length %v, want 13",
+				"%w: %v length %v, want 13",
+				ErrMalformedFrame,
 				messageID,
 				length,
 			)
@@ -258,7 +265,8 @@ func ParseHave(message Message) (pieceIndex uint32, err error) {
 
 	if len(message.Payload) != uint32Size {
 		return 0, fmt.Errorf(
-			"parse have: payload length is %v, want %v",
+			"parse have %w : payload length is %v, want %v",
+			ErrMalformedFrame,
 			len(message.Payload),
 			uint32Size,
 		)
@@ -313,7 +321,8 @@ func ParseRequest(message Message) (pieceIndex, begin, length uint32, err error)
 
 	if len(message.Payload) != uint32Size*3 {
 		return 0, 0, 0, fmt.Errorf(
-			"parse request: payload length is %v, want %v",
+			"parse request %w: payload length is %v, want %v",
+			ErrMalformedFrame,
 			len(message.Payload),
 			uint32Size*3,
 		)
@@ -324,7 +333,7 @@ func ParseRequest(message Message) (pieceIndex, begin, length uint32, err error)
 	length = binary.BigEndian.Uint32(message.Payload[uint32Size*2 : uint32Size*3])
 
 	if length == 0 {
-		return 0, 0, 0, errors.New("parse request: length cannot be zero")
+		return 0, 0, 0, errors.New("%w: parse request length cannot be zero")
 	}
 
 	if length > MaxBlockSize {
@@ -385,7 +394,8 @@ func ParsePiece(message Message) (pieceIndex, begin uint32, block []byte, err er
 
 	if len(message.Payload) < 2*uint32Size {
 		return 0, 0, nil, fmt.Errorf(
-			"parse piece: payload length is %v, want at least %v",
+			"parse piece %w: payload length is %v, want at least %v",
+			ErrMalformedFrame,
 			len(message.Payload),
 			uint32Size*2,
 		)
@@ -397,7 +407,8 @@ func ParsePiece(message Message) (pieceIndex, begin uint32, block []byte, err er
 
 	if len(block) > MaxBlockSize {
 		return 0, 0, nil, fmt.Errorf(
-			"parse piece: block size %v, max allowed block size: %v",
+			"parse piece %w: block size %v, max allowed block size: %v",
+			ErrMalformedFrame,
 			len(block),
 			MaxBlockSize,
 		)

@@ -196,14 +196,21 @@ func (s *Session) FetchPiece(
 	}
 
 	// check if piece is read before
-	if !s.HasPiece(pieceIndex) {
+	for !s.HasPiece(pieceIndex) {
 		message, err := read()
+
 		if err != nil {
 			return fmt.Errorf("read piece advertisement: %w", err)
 		}
-		if (message.ID != peerwire.MessageBitfield && message.ID != peerwire.MessageHave) ||
-			!s.HasPiece(pieceIndex) {
-			return ErrPieceUnavailable
+
+		// keep waiting for bitfield for whether requested piece is available
+		switch message.ID {
+		case peerwire.MessageBitfield:
+			if !s.HasPiece(pieceIndex) {
+				return ErrPieceUnavailable
+			}
+		case peerwire.MessagePiece:
+			return fmt.Errorf("%w: received block before requesting", ErrPeerProtocol)
 		}
 	}
 

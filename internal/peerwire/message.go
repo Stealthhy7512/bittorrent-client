@@ -11,6 +11,7 @@ const (
 	// MaxBlockSize is the largest block allowed in `Request` and `Piece` messages.
 	MaxBlockSize = 16 * 1024
 	uint32Size   = 4
+	maxMsgLen    = 1 << 20
 )
 
 type MessageID byte
@@ -49,6 +50,9 @@ type Frame struct {
 
 // WriteTo writes the length prefix, ID, and payload, completing short writes.
 func (m Message) WriteTo(w io.Writer) (int64, error) {
+	if len(m.Payload) >= maxMsgLen {
+		return 0, fmt.Errorf("message length exceeds %d bytes", maxMsgLen)
+	}
 	length := 1 + len(m.Payload)
 
 	buf := make([]byte, uint32Size+length)
@@ -69,6 +73,9 @@ func (m Message) WriteTo(w io.Writer) (int64, error) {
 // A rejected declaration may leave its payload unread. The caller must treat
 // that error as terminal for the stream rather than attempt another frame read.
 func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
+	if err := validatePieceCount(pieceCount); err != nil {
+		return Frame{}, err
+	}
 	var prefix [uint32Size]byte
 	if _, err := io.ReadFull(r, prefix[:]); err != nil {
 		return Frame{}, fmt.Errorf("read msg length: %w", err)
@@ -83,7 +90,6 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 		}, nil
 	}
 
-	const maxMsgLen uint32 = 1 << 20
 	if length > maxMsgLen {
 		return Frame{}, fmt.Errorf("msg length %d exceeds max length %d", length, maxMsgLen)
 
@@ -116,11 +122,8 @@ func ReadFrame(r io.Reader, pieceCount int) (Frame, error) {
 			)
 		}
 	case MessageBitfield:
-		expectedBytes := pieceCount / 8
-		if pieceCount%8 != 0 {
-			expectedBytes++
-		}
-		if length != uint32(expectedBytes+1) { // include MessageID
+		expectedBytes := bitfieldByteCount(pieceCount)
+		if uint64(length) != uint64(expectedBytes)+1 { // include MessageID
 			return Frame{}, fmt.Errorf(
 				"message %v: bitfield length is %v, want %v",
 				messageID,

@@ -51,6 +51,19 @@ func TestMessageWriteToIncludesPayload(t *testing.T) {
 	}
 }
 
+func TestMessageWriteToRejectsFrameLargerThanReaderLimit(t *testing.T) {
+	var output bytes.Buffer
+	message := Message{ID: MessageBitfield, Payload: make([]byte, 1<<20)}
+
+	n, err := message.WriteTo(&output)
+	if err == nil {
+		t.Fatal("WriteTo() error = nil, want oversized-frame error")
+	}
+	if n != 0 || output.Len() != 0 {
+		t.Fatalf("WriteTo() wrote %d bytes, output length %d; want no output", n, output.Len())
+	}
+}
+
 func TestWriteKeepAliveWritesZeroLengthPrefix(t *testing.T) {
 	var w bytes.Buffer
 	want := []byte{0, 0, 0, 0}
@@ -80,6 +93,13 @@ func TestReadFrameReadsInterested(t *testing.T) {
 	}
 	if len(message.Payload) != 0 {
 		t.Fatalf("Payload = %v, want empty payload", message.Payload)
+	}
+}
+
+func TestReadFrameRejectsNegativePieceCount(t *testing.T) {
+	input := []byte{0, 0, 0, 0} // keep-alive
+	if _, err := ReadFrame(bytes.NewReader(input), -1); err == nil {
+		t.Fatal("ReadFrame() error = nil, want invalid Piece count error")
 	}
 }
 

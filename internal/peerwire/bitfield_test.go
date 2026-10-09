@@ -30,6 +30,20 @@ func TestNewBitfieldRejectsNegativePieceCount(t *testing.T) {
 	}
 }
 
+func TestBitfieldRejectsPieceCountBeyondWireIndexRange(t *testing.T) {
+	tooMany := uint64(1<<32) + 1
+	if uint64(int(tooMany)) != tooMany {
+		t.Skip("int cannot represent more than 2^32 Pieces on this platform")
+	}
+	pieceCount := int(tooMany)
+	if _, err := NewBitfield(pieceCount); err == nil {
+		t.Fatal("NewBitfield() error = nil, want wire-index range error")
+	}
+	if _, err := ParseBitfield(nil, pieceCount); err == nil {
+		t.Fatal("ParseBitfield() error = nil, want wire-index range error")
+	}
+}
+
 func TestBitfieldHasPieceUsesHighBitFirst(t *testing.T) {
 	bitfield, err := ParseBitfield([]byte{0b10100001}, 8)
 	if err != nil {

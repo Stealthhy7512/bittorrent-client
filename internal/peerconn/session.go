@@ -115,6 +115,9 @@ func (s *Session) Read() (peerwire.Message, error) {
 			if err != nil {
 				return peerwire.Message{}, err
 			}
+			if uint64(index) >= uint64(s.pieceCount) {
+				return peerwire.Message{}, fmt.Errorf("have piece index %d is out of range %d", index, s.pieceCount)
+			}
 			if err := s.peerPieces.SetPiece(int(index)); err != nil {
 				return peerwire.Message{}, fmt.Errorf("apply have: %w", err)
 			}
@@ -140,6 +143,7 @@ func (s *Session) FetchPiece(
 	if uint64(piece.Index) >= uint64(s.pieceCount) {
 		return fmt.Errorf("piece index %d is out of range %d", piece.Index, s.pieceCount)
 	}
+	pieceIndex := int(piece.Index)
 	if piece.Length == 0 {
 		return errors.New("piece length must be positive")
 	}
@@ -178,13 +182,13 @@ func (s *Session) FetchPiece(
 	}
 
 	// check if piece is read before
-	if !s.HasPiece(int(piece.Index)) {
+	if !s.HasPiece(pieceIndex) {
 		message, err := read()
 		if err != nil {
 			return fmt.Errorf("read piece advertisement: %w", err)
 		}
 		if (message.ID != peerwire.MessageBitfield && message.ID != peerwire.MessageHave) ||
-			!s.HasPiece(int(piece.Index)) {
+			!s.HasPiece(pieceIndex) {
 			return ErrPieceUnavailable
 		}
 	}

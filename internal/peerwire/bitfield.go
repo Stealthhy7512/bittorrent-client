@@ -15,23 +15,34 @@ type Bitfield struct {
 }
 
 func NewBitfield(pieceCount int) (Bitfield, error) {
-	if pieceCount < 0 {
-		return Bitfield{}, fmt.Errorf(
-			"piece count cannot be negative: %v",
-			pieceCount,
-		)
-	}
-
-	// compute minimum required bytes to fit in bits
-	payloadLength := pieceCount / 8
-	if pieceCount%8 != 0 {
-		payloadLength++
+	if err := validatePieceCount(pieceCount); err != nil {
+		return Bitfield{}, err
 	}
 
 	return Bitfield{
-		bits:       make([]byte, payloadLength),
+		bits:       make([]byte, bitfieldByteCount(pieceCount)),
 		pieceCount: pieceCount,
 	}, nil
+}
+
+func validatePieceCount(pieceCount int) error {
+	if pieceCount < 0 {
+		return fmt.Errorf("piece count cannot be negative: %d", pieceCount)
+	}
+	if uint64(pieceCount) > 1<<32 {
+		return fmt.Errorf("piece count %d exceeds peer-wire index range", pieceCount)
+	}
+	return nil
+}
+
+// bitfieldByteCount rounds a validated, non-negative Piece count up to bytes
+// without adding to pieceCount, which could overflow int.
+func bitfieldByteCount(pieceCount int) int {
+	bytes := pieceCount / 8
+	if pieceCount%8 != 0 {
+		bytes++
+	}
+	return bytes
 }
 
 // WriteBitfield writes the supplied availability set as a framed Bitfield
@@ -48,11 +59,11 @@ func WriteBitfield(w io.Writer, bitfield Bitfield) (int64, error) {
 //
 // Exact piece count is needed to parse correctly.
 func ParseBitfield(payload []byte, pieceCount int) (Bitfield, error) {
-	if pieceCount < 0 {
-		return Bitfield{}, fmt.Errorf("piece count cannot be negative: %v", pieceCount)
+	if err := validatePieceCount(pieceCount); err != nil {
+		return Bitfield{}, err
 	}
 
-	expectedPayloadSize := (pieceCount + 7) / 8
+	expectedPayloadSize := bitfieldByteCount(pieceCount)
 
 	if len(payload) != expectedPayloadSize {
 		return Bitfield{}, fmt.Errorf(

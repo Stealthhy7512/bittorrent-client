@@ -81,6 +81,9 @@ func (meta metaInfo) toTorrentFile(infoHash [20]byte) (TorrentFile, error) {
 	if err != nil {
 		return TorrentFile{}, err
 	}
+	if uint64(len(pieceHashes)) > 1<<32 {
+		return TorrentFile{}, errors.New("piece hash count exceeds peer-wire index range")
+	}
 	expectedPieceCount := int64(0)
 	if meta.Info.Length > 0 {
 		expectedPieceCount = 1 + (meta.Info.Length-1)/meta.Info.PieceLength

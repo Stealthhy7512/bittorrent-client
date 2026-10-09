@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -163,6 +164,148 @@ func TestHandshakeCommandCompletesAgainstLocalTrackerAndPeer(t *testing.T) {
 	}
 	if err := <-peerDone; err != nil {
 		t.Fatalf("fake peer error = %v", err)
+	}
+}
+
+func TestDownloadPieceCommandPublishesVerifiedSingleBlock(t *testing.T) {
+	const pieceData = "data"
+	pieceHash := sha1.Sum([]byte(pieceData))
+	rawInfo := "d6:lengthi4e4:name4:test12:piece lengthi4e6:pieces20:" + string(pieceHash[:]) + "e"
+	infoHash := sha1.Sum([]byte(rawInfo))
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	outputPath := filepath.Join(t.TempDir(), "piece.bin")
+	peerDone := make(chan error, 1)
+	go func() {
+		peerDone <- func() error {
+			conn, err := listener.Accept()
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+				return err
+			}
+
+			handshake, err := peerwire.ReadHandshake(conn)
+			if err != nil {
+				return fmt.Errorf("read Handshake: %w", err)
+			}
+			if handshake.InfoHash != infoHash {
+				return fmt.Errorf("Handshake info hash = %x, want %x", handshake.InfoHash, infoHash)
+			}
+			if _, err := (peerwire.Handshake{InfoHash: infoHash, PeerID: [20]byte{9}}).WriteTo(conn); err != nil {
+				return fmt.Errorf("write Handshake: %w", err)
+			}
+			if _, err := (peerwire.Message{ID: peerwire.MessageBitfield, Payload: []byte{0x80}}).WriteTo(conn); err != nil {
+				return fmt.Errorf("advertise Piece: %w", err)
+			}
+
+			frame, err := peerwire.ReadFrame(conn, 1)
+			if err != nil {
+				return fmt.Errorf("read Interested: %w", err)
+			}
+			message, ok := frame.Message()
+			if !ok || message.ID != peerwire.MessageInterested {
+				return fmt.Errorf("received %#v, want Interested", frame)
+			}
+			if _, err := peerwire.WriteUnchoke(conn); err != nil {
+				return fmt.Errorf("write Unchoke: %w", err)
+			}
+
+			frame, err = peerwire.ReadFrame(conn, 1)
+			if err != nil {
+				return fmt.Errorf("read Request: %w", err)
+			}
+			message, ok = frame.Message()
+			if !ok {
+				return fmt.Errorf("received %#v, want Request", frame)
+			}
+			index, offset, length, err := peerwire.ParseRequest(message)
+			if err != nil {
+				return fmt.Errorf("parse Request: %w", err)
+			}
+			if index != 0 || offset != 0 || length != uint32(len(pieceData)) {
+				return fmt.Errorf("Request = (%d, %d, %d), want (0, 0, %d)", index, offset, length, len(pieceData))
+			}
+			if _, err := os.Stat(outputPath); !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("destination existed before Piece response: %v", err)
+			}
+			if _, err := peerwire.WritePiece(conn, 0, 0, []byte(pieceData)); err != nil {
+				return fmt.Errorf("write Piece: %w", err)
+			}
+			return nil
+		}()
+	}()
+
+	trackerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Query().Get("event") {
+		case "started":
+			response := []byte("d8:intervali60e5:peers6:")
+			response = appendCompactAddr(response, listener.Addr().(*net.TCPAddr))
+			response = append(response, 'e')
+			_, _ = w.Write(response)
+		case "stopped":
+			_, _ = io.WriteString(w, "d8:intervali60e5:peers0:e")
+		default:
+			http.Error(w, "expected started or stopped announce", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(trackerServer.Close)
+	metainfoPath := writeMetainfo(t, trackerServer.URL, rawInfo)
+
+	previousStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	t.Cleanup(func() {
+		os.Stdout = previousStdout
+		reader.Close()
+		writer.Close()
+	})
+	runErr := run([]string{
+		"download-piece", "--piece", "0", "--output", outputPath,
+		"--timeout", "5s", metainfoPath,
+	})
+	os.Stdout = previousStdout
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runErr != nil {
+		t.Fatalf("run(download-piece) error = %v", runErr)
+	}
+	select {
+	case peerErr := <-peerDone:
+		if peerErr != nil {
+			t.Fatalf("fake peer error = %v", peerErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("download command returned before the fake peer finished")
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read published Piece: %v", err)
+	}
+	if string(got) != pieceData {
+		t.Fatalf("published Piece = %q, want %q", got, pieceData)
+	}
+	line := string(stdout)
+	if !strings.HasSuffix(line, "\n") || strings.Count(line, "\n") != 1 ||
+		!strings.Contains(strings.Replace(line, outputPath, "", 1), "0") ||
+		!strings.Contains(line, outputPath) {
+		t.Fatalf("stdout = %q, want one success line with Piece index and output path", line)
 	}
 }
 

@@ -54,7 +54,7 @@ func WriteBitfield(w io.Writer, bitfield Bitfield) (int64, error) {
 	}.WriteTo(w)
 }
 
-// ParseBitfield reads a bitstream containing a bitfield, validates and returns a
+// ParseBitfield reads a bitstream containing a Bitfield, validates and returns a
 // `Bitfield` object with copied underlying bits.
 //
 // Exact piece count is needed to parse correctly.

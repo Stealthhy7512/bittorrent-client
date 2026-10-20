@@ -61,7 +61,7 @@ func ReadHandshake(r io.Reader) (Handshake, error) {
 	return hs, nil
 }
 
-// bytes converts a `Handshake` object into a byte stream.
+// bytes converts a Handshake object into a byte stream.
 func (h Handshake) bytes() [handshakeSize]byte {
 	var buf [handshakeSize]byte
 

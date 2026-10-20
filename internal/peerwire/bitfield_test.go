@@ -174,7 +174,7 @@ func TestParseBitfieldAllowsAllBitsWhenByteAligned(t *testing.T) {
 		t.Fatalf("ParseBitfield() error = %v", err)
 	}
 
-	for pieceIndex := 0; pieceIndex < 8; pieceIndex++ {
+	for pieceIndex := range 8 {
 		if !bitfield.HasPiece(pieceIndex) {
 			t.Errorf("HasPiece(%d) = false, want true", pieceIndex)
 		}

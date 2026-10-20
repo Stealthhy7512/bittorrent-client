@@ -34,6 +34,7 @@ func (c *Client) Announce(
 		return AnnounceResponse{}, err
 	}
 
+	// FIXME: 2 min timeout?
 	client := c.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}

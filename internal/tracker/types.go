@@ -43,5 +43,5 @@ type Peer struct {
 
 // Client performs HTTP announces. Its zero value uses a default HTTP client.
 type Client struct {
-	HTTPClient *http.Client
+	HTTPClient *http.Client // spec default timeout 2 min
 }

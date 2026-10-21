@@ -9,9 +9,9 @@ import (
 
 const (
 	// MaxBlockSize is the largest block allowed in `Request` and `Piece` messages.
-	MaxBlockSize = 16 * 1024
+	MaxBlockSize = 16 * 1024 // 16 KiB
 	uint32Size   = 4
-	maxMsgLen    = 1 << 20
+	maxMsgLen    = 1 << 20 // 1 MiB
 )
 
 type MessageID byte

@@ -340,7 +340,7 @@ func TestSessionFetchesOneBlockFromPeer(t *testing.T) {
 	}
 }
 
-func TestSessionFetchesPieceWithTwoFullBlocksAndShortFinalBlock(t *testing.T) {
+func TestSessionFetchesPieceWithMultipleBlocks(t *testing.T) {
 	const fullBlock = 16 * 1024
 
 	client, peer := net.Pipe()
@@ -423,7 +423,7 @@ func TestSessionFetchesPieceWithTwoFullBlocksAndShortFinalBlock(t *testing.T) {
 	defer cancel()
 	received := make([]byte, len(want))
 	seen := make(map[uint32]bool, len(blocks))
-	err = session.FetchPiece(ctx, PieceSpec{Index: 0, Length: uint64(len(want))}, func(offset uint32, block []byte) error {
+	err = session.FetchPiece(ctx, PieceSpec{Index: 0, Length: uint32(len(want))}, func(offset uint32, block []byte) error {
 		expected, exists := blocks[offset]
 		if !exists || seen[offset] || len(block) != len(expected) {
 			return fmt.Errorf("unexpected Block at offset %d with length %d", offset, len(block))

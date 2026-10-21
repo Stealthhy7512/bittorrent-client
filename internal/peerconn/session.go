@@ -24,7 +24,7 @@ type Session struct {
 // The caller derives both fields from validated metainfo.
 type PieceSpec struct {
 	Index  uint32
-	Length uint64
+	Length uint32
 }
 
 var (
@@ -34,7 +34,7 @@ var (
 	// ErrPeerProtocol reports a well-formed message that violates session state
 	// or does not match the outstanding request.
 	ErrPeerProtocol = errors.New("peer protocol violation")
-	// ErrPeerChoked means this single-block transfer stopped after a choke.
+	// ErrPeerChoked means the peer choked before completing the piece.
 	ErrPeerChoked = errors.New("peer choked before completing the piece")
 )
 
@@ -135,10 +135,10 @@ func (s *Session) Read() (peerwire.Message, error) {
 	}
 }
 
-// FetchPiece obtains a single-block piece from this peer. It waits for a Have
-// or Bitfield advertising the piece; a Bitfield that excludes it ends this
-// attempt. It calls onBlock synchronously after validating the response; the
-// caller verifies the piece hash.
+// FetchPiece obtains a piece from this peer in blocks of at most 16 KiB. It
+// waits for a Have or Bitfield advertising the piece; a Bitfield that excludes
+// it ends this attempt. It calls onBlock after validating each response; the
+// caller verifies the piece hash after all blocks are delivered.
 func (s *Session) FetchPiece(
 	ctx context.Context,
 	piece PieceSpec,
@@ -157,57 +157,110 @@ func (s *Session) FetchPiece(
 			s.pieceCount,
 		)
 	}
-	pieceIndex := int(piece.Index)
 	if piece.Length == 0 {
 		return errors.New("piece length must be positive")
-	}
-	if piece.Length > peerwire.MaxBlockSize {
-		return fmt.Errorf(
-			"single-block piece length %d exceeds %d",
-			piece.Length,
-			peerwire.MaxBlockSize,
-		)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 
-	// A single-block transfer has no intermediate Block progress that could
-	// refresh its inactivity budget. The parent context may expire sooner.
-	sessionCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	stopWatching, err := watchContext(sessionCtx, s.conn)
-	if err != nil {
-		return fmt.Errorf("watch session context: %w", err)
-	}
-	defer stopWatching()
-
-	read := func() (peerwire.Message, error) {
-		message, err := s.Read()
-		if err != nil {
-			if ctxErr := sessionCtx.Err(); ctxErr != nil {
-				return peerwire.Message{}, ctxErr
-			}
-		}
-		return message, err
-	}
-	writeError := func(err error) error {
-		if ctxErr := sessionCtx.Err(); ctxErr != nil {
-			return ctxErr
-		}
+	if err := s.waitUntilReady(ctx, int(piece.Index)); err != nil {
 		return err
 	}
 
-	// wait for the peer to advertise the requested piece
-	for !s.HasPiece(pieceIndex) {
-		message, err := read()
+	// request each block
+	for blockOffset := uint32(0); blockOffset < piece.Length; {
+		length := min(peerwire.MaxBlockSize, piece.Length-blockOffset)
 
+		// manage contexts and watcher per block
+		err := func() error {
+			blockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+
+			stopWatching, err := watchContext(blockCtx, s.conn)
+			if err != nil {
+				return fmt.Errorf("watch block context: %w", err)
+			}
+			defer stopWatching()
+
+			if err := blockCtx.Err(); err != nil {
+				return err
+			}
+			if _, err := peerwire.WriteRequest(s.conn, piece.Index, blockOffset, length); err != nil {
+				return fmt.Errorf("write request: %w", contextIOError(blockCtx, err))
+			}
+
+		InnerLoop:
+			for {
+				message, err := s.readWithContext(blockCtx)
+				if err != nil {
+					return fmt.Errorf("read block context error: %w", err)
+				}
+
+				switch message.ID {
+				case peerwire.MessageChoke:
+					return ErrPeerChoked
+				case peerwire.MessagePiece:
+					index, begin, block, err := peerwire.ParsePiece(message)
+					if err != nil {
+						return fmt.Errorf("parse piece: %w", err)
+					}
+					if index != piece.Index || begin != uint32(blockOffset) || len(block) != int(length) {
+						return fmt.Errorf("%w: block (%v, %v, %v), want (%v, %v, %v)",
+							ErrPeerProtocol, index, begin, len(block), piece.Index, blockOffset, length)
+					}
+					if err := blockCtx.Err(); err != nil {
+						return err
+					}
+					if err := onBlock(blockOffset, block); err != nil {
+						return fmt.Errorf("accept block: %w", err)
+					}
+
+					break InnerLoop
+				default:
+					// other messages do not complete the outstanding request,
+					// keep reading
+				}
+			}
+			return nil
+		}()
+		if err != nil {
+			return err
+		}
+
+		// update block offset for writing
+		blockOffset += length
+	}
+
+	return nil
+}
+
+func (s *Session) Choked() bool {
+	return s.choked
+}
+
+func (s *Session) HasPiece(index int) bool {
+	return s.peerPieces.HasPiece(index)
+}
+
+// waitUntilReady waits for the peer to advertise pieceIndex, then sends
+// Interested and waits for Unchoke.
+func (s *Session) waitUntilReady(ctx context.Context, pieceIndex int) error {
+	setupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	stopWatching, err := watchContext(setupCtx, s.conn)
+	if err != nil {
+		return fmt.Errorf("watch setup context: %w", err)
+	}
+	defer stopWatching()
+
+	// Wait for the peer to advertise the requested piece.
+	for !s.HasPiece(pieceIndex) {
+		message, err := s.readWithContext(setupCtx)
 		if err != nil {
 			return fmt.Errorf("read piece advertisement: %w", err)
 		}
-
-		// a Bitfield reports the peer's complete availability at this moment
 		switch message.ID {
 		case peerwire.MessageBitfield:
 			if !s.HasPiece(pieceIndex) {
@@ -219,12 +272,12 @@ func (s *Session) FetchPiece(
 	}
 
 	if _, err := peerwire.WriteInterested(s.conn); err != nil {
-		return fmt.Errorf("write interested: %w", writeError(err))
+		return fmt.Errorf("write interested: %w", contextIOError(setupCtx, err))
 	}
 
-	// wait for unchoke
+	// Wait for Unchoke before requesting any blocks.
 	for s.Choked() {
-		message, err := read()
+		message, err := s.readWithContext(setupCtx)
 		if err != nil {
 			return fmt.Errorf("wait for unchoke: %w", err)
 		}
@@ -233,47 +286,20 @@ func (s *Session) FetchPiece(
 		}
 	}
 
-	// request the piece
-	if _, err := peerwire.WriteRequest(s.conn, piece.Index, 0, uint32(piece.Length)); err != nil {
-		return fmt.Errorf("write request: %w", writeError(err))
-	}
-	for {
-		message, err := read()
-		if err != nil {
-			return fmt.Errorf("read requested block: %w", err)
-		}
-
-		switch message.ID {
-		case peerwire.MessageChoke:
-			return ErrPeerChoked
-		case peerwire.MessagePiece:
-			index, offset, block, err := peerwire.ParsePiece(message)
-			if err != nil {
-				return fmt.Errorf("parse piece: %w", err)
-			}
-			if index != piece.Index || offset != 0 || uint64(len(block)) != piece.Length {
-				return fmt.Errorf("%w: block (%d, %d, %d), want (%d, 0, %d)",
-					ErrPeerProtocol, index, offset, len(block), piece.Index, piece.Length)
-			}
-			if ctxErr := sessionCtx.Err(); ctxErr != nil {
-				return ctxErr
-			}
-
-			// deliver the validated block to the caller
-			if err := onBlock(0, block); err != nil {
-				return fmt.Errorf("accept block: %w", err)
-			}
-			return nil
-		default:
-			// other messages do not complete the outstanding request
-		}
-	}
+	return setupCtx.Err()
 }
 
-func (s *Session) Choked() bool {
-	return s.choked
+func (s *Session) readWithContext(ctx context.Context) (peerwire.Message, error) {
+	message, err := s.Read()
+	if err != nil {
+		return peerwire.Message{}, contextIOError(ctx, err)
+	}
+	return message, nil
 }
 
-func (s *Session) HasPiece(index int) bool {
-	return s.peerPieces.HasPiece(index)
+func contextIOError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return err
 }

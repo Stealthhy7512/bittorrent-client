@@ -20,7 +20,6 @@ import (
 
 	"github.com/Stealthhy7512/bittorrent-client/internal/metainfo"
 	"github.com/Stealthhy7512/bittorrent-client/internal/peerconn"
-	"github.com/Stealthhy7512/bittorrent-client/internal/peerwire"
 	"github.com/Stealthhy7512/bittorrent-client/internal/tracker"
 )
 
@@ -276,12 +275,8 @@ func downloadPiece(args []string) error {
 	// the final piece may be shorter than the declared piece length
 	start := int64(*piece) * torrent.PieceLength
 	length := min(torrent.PieceLength, torrent.Length-start)
-	if length <= 0 || uint64(length) > 1<<32 {
+	if length <= 0 || uint64(length) > (1<<32)-1 {
 		return fmt.Errorf("piece length %d is outside peer-wire offset range", length)
-	}
-
-	if length > peerwire.MaxBlockSize {
-		return fmt.Errorf("piece size %v exceeds allowed maximum: %v", length, peerwire.MaxBlockSize)
 	}
 
 	// reject an existing destination before announcing to the tracker
@@ -355,7 +350,7 @@ func downloadPiece(args []string) error {
 
 	err = session.FetchPiece(
 		ctx,
-		peerconn.PieceSpec{Index: uint32(*piece), Length: uint64(length)},
+		peerconn.PieceSpec{Index: uint32(*piece), Length: uint32(length)},
 		func(offset uint32, block []byte) error {
 			n, err := temp.WriteAt(block, int64(offset))
 			if err != nil {

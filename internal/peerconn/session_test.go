@@ -340,6 +340,111 @@ func TestSessionFetchesOneBlockFromPeer(t *testing.T) {
 	}
 }
 
+func TestSessionFetchesPieceWithTwoFullBlocksAndShortFinalBlock(t *testing.T) {
+	const fullBlock = 16 * 1024
+
+	client, peer := net.Pipe()
+	defer client.Close()
+	defer peer.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	if err := peer.SetDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewSession(client, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := bytes.Repeat([]byte("A"), fullBlock)
+	second := bytes.Repeat([]byte("B"), fullBlock)
+	final := []byte("tail")
+	want := append(append(append([]byte(nil), first...), second...), final...)
+	blocks := map[uint32][]byte{
+		0:             first,
+		fullBlock:     second,
+		2 * fullBlock: final,
+	}
+
+	peerDone := make(chan error, 1)
+	go func() {
+		peerDone <- func() error {
+			if _, err := (peerwire.Message{
+				ID:      peerwire.MessageBitfield,
+				Payload: []byte{0x80},
+			}).WriteTo(peer); err != nil {
+				return fmt.Errorf("advertise Piece: %w", err)
+			}
+
+			frame, err := peerwire.ReadFrame(peer, 1)
+			if err != nil {
+				return fmt.Errorf("read Interested: %w", err)
+			}
+			message, ok := frame.Message()
+			if !ok || message.ID != peerwire.MessageInterested {
+				return fmt.Errorf("received %#v, want Interested", frame)
+			}
+			if _, err := peerwire.WriteUnchoke(peer); err != nil {
+				return fmt.Errorf("send Unchoke: %w", err)
+			}
+
+			remaining := make(map[uint32][]byte, len(blocks))
+			for offset, block := range blocks {
+				remaining[offset] = block
+			}
+			for range blocks {
+				frame, err := peerwire.ReadFrame(peer, 1)
+				if err != nil {
+					return fmt.Errorf("read Request: %w", err)
+				}
+				message, ok := frame.Message()
+				if !ok {
+					return fmt.Errorf("received %#v, want Request", frame)
+				}
+				index, offset, length, err := peerwire.ParseRequest(message)
+				if err != nil {
+					return fmt.Errorf("parse Request: %w", err)
+				}
+				block, exists := remaining[offset]
+				if index != 0 || !exists || length != uint32(len(block)) {
+					return fmt.Errorf("Request = (%d, %d, %d), want one remaining Piece range", index, offset, length)
+				}
+				delete(remaining, offset)
+				if _, err := peerwire.WritePiece(peer, index, offset, block); err != nil {
+					return fmt.Errorf("send Block at %d: %w", offset, err)
+				}
+			}
+			return nil
+		}()
+	}()
+
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	received := make([]byte, len(want))
+	seen := make(map[uint32]bool, len(blocks))
+	err = session.FetchPiece(ctx, PieceSpec{Index: 0, Length: uint64(len(want))}, func(offset uint32, block []byte) error {
+		expected, exists := blocks[offset]
+		if !exists || seen[offset] || len(block) != len(expected) {
+			return fmt.Errorf("unexpected Block at offset %d with length %d", offset, len(block))
+		}
+		seen[offset] = true
+		copy(received[int(offset):], block)
+		return nil
+	})
+	_ = client.Close() // Unblock the fake Peer if FetchPiece returned early.
+	peerErr := <-peerDone
+	if err != nil {
+		t.Fatalf("FetchPiece() error = %v (fake Peer: %v)", err, peerErr)
+	}
+	if peerErr != nil {
+		t.Fatalf("fake Peer: %v", peerErr)
+	}
+	if len(seen) != len(blocks) || !bytes.Equal(received, want) {
+		t.Fatalf("received %d Blocks and %d bytes; want 3 Blocks containing %d expected bytes", len(seen), len(received), len(want))
+	}
+}
+
 func TestSessionFetchPieceRejectsWrongBlock(t *testing.T) {
 	client, peer := net.Pipe()
 	defer client.Close()
